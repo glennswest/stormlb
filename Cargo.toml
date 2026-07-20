@@ -1,0 +1,28 @@
+[package]
+name = "stormlb"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Rust API/ingress VIP load balancer for the Storm stack — health-checked L4 balance + VRRP (L2) / BGP-anycast (L3). The pre-cluster control-plane LB."
+repository = "https://github.com/glennswest/stormlb"
+
+[[bin]]
+name = "stormlb"
+path = "src/main.rs"
+
+[lib]
+name = "stormlb"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "macros", "sync", "signal"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

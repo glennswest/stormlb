@@ -1,0 +1,40 @@
+# stormlb example: kube-api VIP fronting three masters, L2 (VRRP) mode.
+
+[vip]
+address = "192.168.8.50"   # the VIP clients/kubelets target
+port = 6443
+# bind = "0.0.0.0"         # where the L4 proxy listens (default 0.0.0.0)
+
+[[backend]]
+address = "192.168.8.51"   # master1 apiserver
+port = 6443
+[[backend]]
+address = "192.168.8.52"   # master2
+port = 6443
+[[backend]]
+address = "192.168.8.53"   # master3
+port = 6443
+
+[health]
+mode = "https"             # tcp | http | https
+path = "/readyz"
+interval_secs = 2
+timeout_secs = 2
+expect_status = [200]
+
+# L2 mode: one node owns the VIP (VRRP), sub-second failover.
+[vrrp]
+enabled = true
+interface = "eth0"
+vrid = 51
+priority = 200             # highest live node becomes Master; 255 = address owner
+advert_interval_secs = 1
+
+# L3 mode (phase 2): every node advertises the VIP /32, router ECMP = active-active.
+[bgp]
+enabled = false
+local_asn = 64512
+router_id = "192.168.8.51"
+# [[bgp.peers]]
+# address = "192.168.8.1"
+# asn = 64512

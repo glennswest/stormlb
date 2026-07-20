@@ -1,0 +1,75 @@
+# stormlb
+
+The Storm stack's **pre-cluster control-plane load balancer**, in Rust.
+
+It provides the **kube-api VIP** (and optionally the ingress VIP) that must exist
+*before and independent of* the cluster — the chicken-and-egg the in-cluster CNI
+(Cilium) can't solve, because Cilium runs as a workload and can't front its own
+apiserver. This is OpenShift on-prem's `keepalived + haproxy` role, done in Rust.
+
+**Scope split:** stormlb owns the control-plane VIP(s). Cilium owns the in-cluster
+Service/app data plane (eBPF LB + LB-IPAM + BGP / L2 Announcements). Don't use
+stormlb for Service traffic.
+
+## What it does
+
+- **Health-checked L4 (TCP) balancer** across the master apiservers — TCP,
+  HTTP, or HTTPS `/readyz` checks decide membership; only live masters get
+  traffic. (round-robin)
+- **VRRP (L2)** virtual-router state machine (RFC 5798) so one node owns the VIP
+  with sub-second failover — active-passive ingress, active-active backend.
+- **BGP-anycast (L3)** — every healthy node advertises the VIP `/32` and the
+  upstream router ECMP-hashes flows → true active-active with route-withdraw
+  failover. *(phase 2; interface + design in place.)*
+
+## Modes
+
+| | L2 (VRRP) | L3 (BGP anycast) |
+|---|---|---|
+| VIP owner | one node at a time | every node (anycast) |
+| Failover | VRRP master-down (<1s) | route withdraw |
+| Ingress | active-passive | active-active (ECMP) |
+| Fabric needs | plain L2 segment | BGP peering |
+
+Both balance the **backend** (masters) via health-checked L4; the difference is
+how the VIP itself is presented to the network.
+
+## vs a DNS load balancer
+
+A health-checked, short-TTL DNS LB is a valid approach and can coexist — point
+the DNS name at the stormlb VIP, or run stormlb as the tighter-failover
+alternative (single stable VIP, no resolver-cache dependency, sub-second).
+
+## Config
+
+TOML — see [`examples/stormlb.toml`](examples/stormlb.toml). Run:
+
+```
+stormlb --config /etc/stormlb/stormlb.toml
+```
+
+## Status (v0.1)
+
+Implemented and tested:
+- Config, health checks (TCP/HTTP/HTTPS), L4 balancer with round-robin + failover
+  (integration test), VRRP state machine + advertisement codec (unit tests),
+  VIP controller (iproute2) behind a trait.
+
+Remaining wiring:
+- **VRRP sockets** — join `224.0.0.18`, send/receive adverts on an
+  `IPPROTO_VRRP` raw socket, and drive `on_advertisement` / master-down timers to
+  `claim`/`release` the VIP on transitions. The state machine and VIP control it
+  calls are done and tested; this is the I/O loop. (root / `CAP_NET_ADMIN`.)
+- **BGP** — the FSM + UPDATE encoding behind the `bgp::Speaker` trait (phase 2).
+
+## Build / test
+
+```
+cargo build --release
+cargo test
+```
+
+## Integration
+
+Consumed by **stormcos** as a host service (systemd), started before the kubelet
+so the apiserver VIP is up first. See the stormcos integration issue.
