@@ -50,17 +50,21 @@ stormlb --config /etc/stormlb/stormlb.toml
 
 ## Status (v0.1)
 
-Implemented and tested:
+Implemented and tested (20 tests):
 - Config, health checks (TCP/HTTP/HTTPS), L4 balancer with round-robin + failover
-  (integration test), VRRP state machine + advertisement codec (unit tests),
-  VIP controller (iproute2) behind a trait.
+  (integration test).
+- **VRRP (L2)** — full control loop: `IPPROTO_VRRP` raw socket joining
+  `224.0.0.18`, sends/receives advertisements, drives the RFC-5798 state machine
+  (Init/Backup/Master, master-down timing, priority + address tie-break) and
+  `claim`/`release`s the VIP through iproute2 on transitions. Needs
+  `CAP_NET_ADMIN` / `CAP_NET_RAW`.
+- **BGP (L3 anycast)** — a minimal eBGP speaker: OPEN/KEEPALIVE handshake and
+  UPDATE announce/withdraw of the VIP `/32` (next-hop = this node) driven by
+  backend health, with per-peer reconnect. 2-byte ASNs, IPv4 unicast.
+- VIP controller (iproute2 + gratuitous ARP) behind a trait.
 
-Remaining wiring:
-- **VRRP sockets** — join `224.0.0.18`, send/receive adverts on an
-  `IPPROTO_VRRP` raw socket, and drive `on_advertisement` / master-down timers to
-  `claim`/`release` the VIP on transitions. The state machine and VIP control it
-  calls are done and tested; this is the I/O loop. (root / `CAP_NET_ADMIN`.)
-- **BGP** — the FSM + UPDATE encoding behind the `bgp::Speaker` trait (phase 2).
+Follow-ups: 4-octet ASN capability + multiprotocol for BGP; a graceful
+priority-0 VRRP resign on shutdown; netlink-native VIP control.
 
 ## Build / test
 

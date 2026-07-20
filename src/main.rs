@@ -2,8 +2,12 @@
 
 use anyhow::Result;
 use clap::Parser;
+use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use stormlb::{balancer, config, health, pool::Pool, vip::VipController, vrrp};
+use std::time::Duration;
+use stormlb::vip::{IpCmd, VipController};
+use stormlb::{balancer, bgp, config, health, pool::Pool, vrrp};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -33,6 +37,11 @@ async fn main() -> Result<()> {
         warn!("no backends configured — the balancer will refuse every connection");
     }
     let pool = Arc::new(Pool::new(addrs));
+    let vip: Ipv4Addr = cfg
+        .vip
+        .address
+        .parse()
+        .map_err(|_| anyhow::anyhow!("vip.address must be an IPv4 address"))?;
 
     info!(
         "stormlb starting — vip={}:{} backends={} health={:?}",
@@ -45,44 +54,45 @@ async fn main() -> Result<()> {
     // Health loop drives pool membership.
     tokio::spawn(health::run(pool.clone(), cfg.health.clone()));
 
-    // VIP ownership. VRRP (L2) claims the VIP on this node when Master; BGP
-    // (L3 anycast) is phase 2. Without either, we assume the VIP is already
-    // local (or we bind 0.0.0.0) — useful for single-node / testing.
-    if cfg.bgp.enabled {
-        warn!("bgp.enabled is set but BGP anycast is phase 2 — falling back to local bind");
-    }
+    // VIP presentation. L2 (VRRP) claims the VIP on the elected Master; L3 (BGP
+    // anycast) has every healthy node advertise the /32. Without either, we
+    // assume the VIP is already local / bind 0.0.0.0 (single-node / testing).
     if cfg.vrrp.enabled {
-        spawn_vrrp(&cfg, pool.clone());
+        let iface = cfg.vrrp.interface.clone();
+        let (vrid, prio, ai) = (
+            cfg.vrrp.vrid,
+            cfg.vrrp.priority,
+            cfg.vrrp.advert_interval_secs,
+        );
+        // VRRP is a blocking control loop (raw socket + iproute2) — own OS thread.
+        std::thread::spawn(move || {
+            let ctl: Arc<dyn VipController> = Arc::new(IpCmd);
+            if let Err(e) = vrrp::run(vrid, prio, ai, &iface, vip, ctl) {
+                warn!("VRRP loop exited: {e}");
+            }
+        });
+    }
+
+    if cfg.bgp.enabled {
+        match bgp::preflight(&cfg.bgp) {
+            Ok(next_hop) => {
+                // Advertise the VIP while this node has healthy backends.
+                let advertise = Arc::new(AtomicBool::new(false));
+                let p = pool.clone();
+                let adv = advertise.clone();
+                tokio::spawn(async move {
+                    loop {
+                        adv.store(p.healthy_count() > 0, Ordering::Relaxed);
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                });
+                bgp::spawn(&cfg.bgp, vip, next_hop, advertise);
+            }
+            Err(e) => warn!("bgp disabled: {e}"),
+        }
     }
 
     // L4 balancer listens on the configured bind address (default 0.0.0.0).
     let listen = format!("{}:{}", cfg.vip.bind, cfg.vip.port).parse()?;
     balancer::run(listen, pool).await
-}
-
-/// Wire the VRRP virtual router to VIP claim/release. NOTE: the raw-socket
-/// advertise/receive loop is the remaining wiring (README "VRRP wiring"); today
-/// this drives the state machine + VIP control from the config, which is enough
-/// for a single configured Master and exercises the claim path.
-fn spawn_vrrp(cfg: &config::Config, _pool: Arc<Pool>) {
-    let mut vr = vrrp::VirtualRouter::new(
-        cfg.vrrp.vrid,
-        cfg.vrrp.priority,
-        cfg.vrrp.advert_interval_secs,
-    );
-    let vip = cfg.vip.address.clone();
-    let iface = cfg.vrrp.interface.clone();
-    tokio::spawn(async move {
-        let ctl = stormlb::vip::IpCmd;
-        let state = vr.start();
-        info!("VRRP vrid={} priority={} initial state={:?}", vr.vrid, vr.priority, state);
-        if state == vrrp::State::Master {
-            if let Err(e) = ctl.claim(&vip, &iface) {
-                warn!("VRRP could not claim VIP {vip} on {iface}: {e}");
-            }
-        }
-        // TODO(phase-2): join 224.0.0.18, send/receive adverts, drive
-        // on_advertisement / on_master_down_timeout, and claim/release on
-        // transitions. See README.
-    });
 }

@@ -8,7 +8,19 @@
 //! protocol logic unit-testable without root or a peer. See README "VRRP wiring"
 //! for the remaining socket work.
 
-use std::net::Ipv4Addr;
+use crate::vip::VipController;
+use anyhow::{Context, Result};
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use std::mem::MaybeUninit;
+use std::net::{Ipv4Addr, SocketAddrV4};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tracing::{info, warn};
+
+/// The link-local multicast group all VRRP routers listen on (RFC 5798).
+const VRRP_MCAST: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 18);
+/// IP protocol number assigned to VRRP.
+const IPPROTO_VRRP: i32 = 112;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -132,6 +144,150 @@ fn ones_complement_checksum(data: &[u8]) -> u16 {
     !(sum as u16)
 }
 
+/// Parse a received datagram (IP header + VRRP payload, as delivered by a raw
+/// IPPROTO_VRRP socket) into `(priority, source_ip)` if it is a v3
+/// advertisement for `our_vrid`. Returns None otherwise.
+pub fn parse_advertisement(datagram: &[u8], our_vrid: u8) -> Option<(u8, Ipv4Addr)> {
+    if datagram.len() < 20 {
+        return None;
+    }
+    let ihl = ((datagram[0] & 0x0f) as usize) * 4;
+    if ihl < 20 || datagram.len() < ihl + 8 {
+        return None;
+    }
+    let src = Ipv4Addr::new(datagram[12], datagram[13], datagram[14], datagram[15]);
+    let vrrp = &datagram[ihl..];
+    let version = vrrp[0] >> 4;
+    let vtype = vrrp[0] & 0x0f;
+    let vrid = vrrp[1];
+    let priority = vrrp[2];
+    if version != 3 || vtype != 1 || vrid != our_vrid {
+        return None;
+    }
+    Some((priority, src))
+}
+
+/// Resolve an interface's primary IPv4 address via iproute2 (iproute2 is a
+/// stormcos base package). e.g. `ip -o -4 addr show dev eth0`.
+pub fn interface_ipv4(iface: &str) -> Result<Ipv4Addr> {
+    let out = std::process::Command::new("ip")
+        .args(["-o", "-4", "addr", "show", "dev", iface])
+        .output()
+        .context("running `ip addr`")?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for tok in text.split_whitespace() {
+        if let Some((ip, _mask)) = tok.split_once('/') {
+            if let Ok(addr) = ip.parse::<Ipv4Addr>() {
+                return Ok(addr);
+            }
+        }
+    }
+    anyhow::bail!("no IPv4 address on interface {iface}")
+}
+
+/// Run the VRRP control loop for one virtual router. Blocking — intended to be
+/// spawned on a dedicated OS thread. Sends advertisements while Master, watches
+/// for the master-down timeout while Backup, and claims/releases the VIP through
+/// `ctl` on transitions. Requires CAP_NET_ADMIN / CAP_NET_RAW.
+pub fn run(
+    vrid: u8,
+    priority: u8,
+    advert_interval_secs: u64,
+    iface: &str,
+    vip: Ipv4Addr,
+    ctl: Arc<dyn VipController>,
+) -> Result<()> {
+    let iface_ip = interface_ipv4(iface)?;
+    let sock = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(IPPROTO_VRRP)))
+        .context("creating VRRP raw socket (needs CAP_NET_RAW)")?;
+    sock.set_multicast_if_v4(&iface_ip)?;
+    sock.set_multicast_ttl_v4(255)?;
+    sock.set_multicast_loop_v4(false)?;
+    sock.join_multicast_v4(&VRRP_MCAST, &iface_ip)
+        .context("joining 224.0.0.18")?;
+
+    let advert_interval = Duration::from_secs(advert_interval_secs.max(1));
+    let mut vr = VirtualRouter::new(vrid, priority, advert_interval_secs);
+    let master_down = Duration::from_millis(vr.master_down_interval_centis() as u64 * 10);
+    let vip_s = vip.to_string();
+    let dst = SockAddr::from(SocketAddrV4::new(VRRP_MCAST, 0));
+
+    let state = vr.start();
+    info!(
+        "VRRP vrid={vrid} priority={priority} iface={iface} vip={vip} -> {state:?}"
+    );
+    let mut next_advert = Instant::now();
+    let mut master_down_deadline = Instant::now() + master_down;
+    if state == State::Master {
+        if let Err(e) = ctl.claim(&vip_s, iface) {
+            warn!("VRRP: could not claim VIP {vip} on {iface}: {e}");
+        }
+    }
+
+    let mut buf = [MaybeUninit::<u8>::uninit(); 512];
+    loop {
+        // Wake for the next advert (Master) or the master-down deadline (Backup).
+        let now = Instant::now();
+        let wake = if vr.state == State::Master {
+            next_advert
+        } else {
+            master_down_deadline
+        };
+        let timeout = wake.saturating_duration_since(now).max(Duration::from_millis(10));
+        sock.set_read_timeout(Some(timeout))?;
+
+        match sock.recv_from(&mut buf) {
+            Ok((n, _from)) => {
+                // SAFETY: recv_from initialised the first n bytes.
+                let data = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, n) };
+                if let Some((peer_prio, peer_ip)) = parse_advertisement(data, vrid) {
+                    if peer_ip == iface_ip {
+                        continue; // our own advert (shouldn't happen with loop off)
+                    }
+                    let released = vr.on_advertisement(peer_prio, peer_ip, iface_ip);
+                    match vr.state {
+                        State::Backup => {
+                            if released {
+                                info!("VRRP: preempted by {peer_ip} (prio {peer_prio}) — releasing VIP");
+                                let _ = ctl.release(&vip_s, iface);
+                            }
+                            // A live master seen → restart the master-down timer.
+                            master_down_deadline = Instant::now() + master_down;
+                        }
+                        State::Master => {}
+                        State::Initialize => {}
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                let now = Instant::now();
+                match vr.state {
+                    State::Master => {
+                        if now >= next_advert {
+                            let pkt = encode_advertisement(vrid, priority, vr.advert_interval_centis, &[vip]);
+                            if let Err(e) = sock.send_to(&pkt, &dst) {
+                                warn!("VRRP: send advert failed: {e}");
+                            }
+                            next_advert = now + advert_interval;
+                        }
+                    }
+                    State::Backup => {
+                        if now >= master_down_deadline && vr.on_master_down_timeout() {
+                            info!("VRRP: master-down — becoming MASTER, claiming VIP {vip}");
+                            if let Err(e) = ctl.claim(&vip_s, iface) {
+                                warn!("VRRP: could not claim VIP: {e}");
+                            }
+                            next_advert = now; // advertise immediately
+                        }
+                    }
+                    State::Initialize => {}
+                }
+            }
+            Err(e) => return Err(e).context("VRRP recv"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +338,21 @@ mod tests {
         // advert=100cs, priority=100: skew=((256-100)*100)/256 = 60; 3*100+60=360
         let vr = VirtualRouter::new(51, 100, 1);
         assert_eq!(vr.master_down_interval_centis(), 360);
+    }
+
+    #[test]
+    fn parses_advertisement_from_raw_datagram() {
+        let vrrp = encode_advertisement(51, 200, 100, &[Ipv4Addr::new(192, 168, 8, 50)]);
+        let mut dg = vec![0u8; 20];
+        dg[0] = 0x45; // IPv4, IHL=5 (20-byte header)
+        dg[12..16].copy_from_slice(&[192, 168, 8, 11]); // source addr
+        dg.extend_from_slice(&vrrp);
+        let (prio, src) = parse_advertisement(&dg, 51).unwrap();
+        assert_eq!(prio, 200);
+        assert_eq!(src, Ipv4Addr::new(192, 168, 8, 11));
+        // Wrong vrid, and a too-short datagram, both parse to None.
+        assert!(parse_advertisement(&dg, 99).is_none());
+        assert!(parse_advertisement(&dg[..10], 51).is_none());
     }
 
     #[test]
