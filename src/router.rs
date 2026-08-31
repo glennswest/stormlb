@@ -119,6 +119,24 @@ async fn serve_conn(mut conn: TcpStream, table: &Table) -> anyhow::Result<()> {
     };
 
     let backend = { table.read().await.get(&host).cloned() };
+    // The router's own liveness, on any host no route claims: stormd probes
+    // http://127.0.0.1/healthz, and 127.0.0.1 is never a route's hostname.
+    // A host a route *does* claim proxies /healthz to its backend untouched.
+    if backend.is_none() && request_path(&head[..end]) == Some("/healthz") {
+        let body = "router alive
+";
+        let resp = format!(
+            "HTTP/1.1 200 OK
+content-type: text/plain
+content-length: {}
+connection: close
+
+{body}",
+            body.len()
+        );
+        let _ = conn.write_all(resp.as_bytes()).await;
+        return Ok(());
+    }
     let Some(backend) = backend else {
         // Name the host: "404 from the router" and "404 from the app" look
         // identical from a browser, and the debugging path for each is
@@ -138,6 +156,14 @@ async fn serve_conn(mut conn: TcpStream, table: &Table) -> anyhow::Result<()> {
     upstream.write_all(&head).await?;
     tokio::io::copy_bidirectional(&mut conn, &mut upstream).await?;
     Ok(())
+}
+
+/// The request path, from the request line.
+fn request_path(head: &[u8]) -> Option<&str> {
+    let line = head.split(|&b| b == b'\n').next()?;
+    let line = std::str::from_utf8(line).ok()?;
+    let path = line.split_whitespace().nth(1)?;
+    Some(path.split('?').next().unwrap_or(path))
 }
 
 fn find_head_end(buf: &[u8]) -> Option<usize> {
@@ -256,6 +282,17 @@ mod tests {
     #[test]
     fn a_missing_host_is_none_not_a_panic() {
         assert_eq!(host_of(b"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn the_healthz_path_is_read_from_the_request_line() {
+        assert_eq!(request_path(b"GET /healthz HTTP/1.1
+Host: x
+
+"), Some("/healthz"));
+        assert_eq!(request_path(b"GET /healthz?v=1 HTTP/1.1
+
+"), Some("/healthz"));
     }
 
     #[test]
