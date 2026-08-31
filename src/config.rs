@@ -5,7 +5,10 @@ use std::net::SocketAddr;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    pub vip: Vip,
+    /// The L4 VIP balancer. Optional, because a node can run only the L7
+    /// router — on single-node the VIP is the node's own address and there
+    /// is nothing for VRRP to float.
+    pub vip: Option<Vip>,
     #[serde(default, rename = "backend")]
     pub backends: Vec<BackendCfg>,
     #[serde(default)]
@@ -14,6 +17,9 @@ pub struct Config {
     pub vrrp: VrrpCfg,
     #[serde(default)]
     pub bgp: BgpCfg,
+    /// The L7 Host-header router over HTTPRoutes. Present = enabled.
+    #[serde(default)]
+    pub router: Option<crate::router::RouterCfg>,
 }
 
 /// The virtual IP fronted by this balancer, and where the L4 proxy listens.
@@ -172,8 +178,9 @@ vrid = 51
 priority = 200
 "#;
         let cfg: Config = toml::from_str(toml).unwrap();
-        assert_eq!(cfg.vip.port, 6443);
-        assert_eq!(cfg.vip.bind, "0.0.0.0"); // default
+        let vip = cfg.vip.expect("the fixture declares a vip");
+        assert_eq!(vip.port, 6443);
+        assert_eq!(vip.bind, "0.0.0.0"); // default
         assert_eq!(cfg.backends.len(), 2);
         assert_eq!(cfg.backends[1].socket_addr().unwrap().port(), 6443);
         assert_eq!(cfg.health.mode, HealthMode::Https);

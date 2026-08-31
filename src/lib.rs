@@ -18,5 +18,6 @@ pub mod bgp;
 pub mod config;
 pub mod health;
 pub mod pool;
+pub mod router;
 pub mod vip;
 pub mod vrrp;

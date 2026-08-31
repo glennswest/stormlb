@@ -37,16 +37,28 @@ async fn main() -> Result<()> {
         warn!("no backends configured — the balancer will refuse every connection");
     }
     let pool = Arc::new(Pool::new(addrs));
-    let vip: Ipv4Addr = cfg
-        .vip
+
+    // The L7 router is independent of the VIP: on a single node the VIP is
+    // the node's own address and only the Host demux is wanted, so
+    // [router] alone is a complete configuration.
+    let router = cfg.router.clone();
+    let Some(vip_cfg) = cfg.vip else {
+        let Some(rcfg) = router else {
+            anyhow::bail!("nothing to do: neither [vip] nor [router] is configured");
+        };
+        info!("stormlb starting — router only");
+        return stormlb::router::run(rcfg).await;
+    };
+
+    let vip: Ipv4Addr = vip_cfg
         .address
         .parse()
         .map_err(|_| anyhow::anyhow!("vip.address must be an IPv4 address"))?;
 
     info!(
         "stormlb starting — vip={}:{} backends={} health={:?}",
-        cfg.vip.address,
-        cfg.vip.port,
+        vip_cfg.address,
+        vip_cfg.port,
         cfg.backends.len(),
         cfg.health.mode
     );
@@ -92,7 +104,15 @@ async fn main() -> Result<()> {
         }
     }
 
+    if let Some(rcfg) = router {
+        tokio::spawn(async move {
+            if let Err(e) = stormlb::router::run(rcfg).await {
+                warn!("router exited: {e}");
+            }
+        });
+    }
+
     // L4 balancer listens on the configured bind address (default 0.0.0.0).
-    let listen = format!("{}:{}", cfg.vip.bind, cfg.vip.port).parse()?;
+    let listen = format!("{}:{}", vip_cfg.bind, vip_cfg.port).parse()?;
     balancer::run(listen, pool).await
 }
