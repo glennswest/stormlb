@@ -70,22 +70,26 @@ fn bind_addrs(listen: &str) -> Option<Vec<String>> {
     if !listen.starts_with("auto") {
         return None;
     }
-    let out = std::process::Command::new("ip")
-        .args(["-o", "-4", "addr", "show"])
-        .output()
-        .ok()?;
-    let addrs: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| l.split_whitespace().nth(3))
-        .filter_map(|cidr| cidr.split('/').next())
-        .filter(|a| !a.starts_with("127.") && !a.starts_with("169.254."))
-        .map(|a| format!("{a}:{port}"))
-        .collect();
-    if addrs.is_empty() {
-        None
-    } else {
-        Some(addrs)
+    // The address the kernel would send from, asked of the routing table.
+    //
+    // This shelled out to `ip` first, which is not in this container — so it
+    // returned None, the caller fell back to binding the literal string
+    // "auto:80", and the router died on `failed to lookup address
+    // information: Name does not resolve`. A fallback that binds the
+    // placeholder is worse than no fallback.
+    //
+    // A connected UDP socket sends nothing. `connect` on a datagram socket
+    // only sets the peer, and the kernel picks the source address by looking
+    // up the route — so this works with no network, no DNS and no external
+    // command, and gives exactly the address a client would reach this node
+    // on.
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    probe.connect("203.0.113.1:9").ok()?;
+    let ip = probe.local_addr().ok()?.ip().to_string();
+    if ip.starts_with("127.") || ip.starts_with("169.254.") || ip == "0.0.0.0" {
+        return None;
     }
+    Some(vec![format!("{ip}:{port}")])
 }
 
 fn default_listen() -> String { "0.0.0.0:80".into() }
@@ -126,6 +130,17 @@ pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
                 Some(l) => l,
                 None => return Err(last.expect("at least one address was tried").into()),
             }
+        }
+        // `auto` that could not be resolved falls back to the wildcard, not
+        // to the literal string. Binding "auto:80" is a DNS lookup of a word,
+        // and the error names resolution rather than the placeholder.
+        None if cfg.listen.starts_with("auto") => {
+            let port = cfg.listen.rsplit(':').next().unwrap_or("80");
+            tracing::warn!(
+                "could not determine this node's address; binding 0.0.0.0:{port}. \
+                 If a metadata service holds 169.254.169.254:{port} this will fail."
+            );
+            TcpListener::bind(format!("0.0.0.0:{port}")).await?
         }
         None => TcpListener::bind(&cfg.listen).await?,
     };
