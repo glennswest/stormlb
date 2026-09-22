@@ -59,6 +59,35 @@ pub struct RouterCfg {
     pub insecure: bool,
 }
 
+/// The addresses `auto` resolves to: this node's, minus the ones that belong
+/// to something else.
+///
+/// Loopback is skipped because a router nothing outside can reach is not a
+/// router, and link-local is skipped because 169.254.169.254 is the metadata
+/// service's and 169.254.0.0/16 is not an address anybody routes to us on.
+fn bind_addrs(listen: &str) -> Option<Vec<String>> {
+    let port = listen.rsplit(':').next()?;
+    if !listen.starts_with("auto") {
+        return None;
+    }
+    let out = std::process::Command::new("ip")
+        .args(["-o", "-4", "addr", "show"])
+        .output()
+        .ok()?;
+    let addrs: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(3))
+        .filter_map(|cidr| cidr.split('/').next())
+        .filter(|a| !a.starts_with("127.") && !a.starts_with("169.254."))
+        .map(|a| format!("{a}:{port}"))
+        .collect();
+    if addrs.is_empty() {
+        None
+    } else {
+        Some(addrs)
+    }
+}
+
 fn default_listen() -> String { "0.0.0.0:80".into() }
 fn default_apiserver() -> String { "https://127.0.0.1:6443".into() }
 fn default_poll() -> u64 { 5 }
@@ -69,7 +98,37 @@ type Table = Arc<RwLock<HashMap<String, String>>>;
 
 pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
     let table: Table = Arc::new(RwLock::new(HashMap::new()));
-    let listener = TcpListener::bind(&cfg.listen).await?;
+    // `auto` means every address except the ones that are not ours to take.
+    //
+    // The wildcard includes 169.254.169.254, which the instance metadata
+    // service binds on port 80 — a fixed address every cloud image asks, and
+    // not one this router may claim. Whichever started second got EADDRINUSE
+    // and crash-looped; on this node it was the router, restart=9 and
+    // climbing, with nothing saying the two were fighting over a port.
+    //
+    // So the router binds the node's own routable addresses rather than
+    // everything. Resolved here rather than configured, because the address
+    // is not known when the golden is built.
+    let listener = match bind_addrs(&cfg.listen) {
+        Some(addrs) => {
+            let mut last = None;
+            let mut bound = None;
+            for a in &addrs {
+                match TcpListener::bind(a).await {
+                    Ok(l) => {
+                        bound = Some(l);
+                        break;
+                    }
+                    Err(e) => last = Some(e),
+                }
+            }
+            match bound {
+                Some(l) => l,
+                None => return Err(last.expect("at least one address was tried").into()),
+            }
+        }
+        None => TcpListener::bind(&cfg.listen).await?,
+    };
     info!(listen = %cfg.listen, apiserver = %cfg.apiserver, "router up");
 
     tokio::spawn(poll_routes(cfg.clone(), table.clone()));
