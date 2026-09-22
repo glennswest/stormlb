@@ -89,7 +89,15 @@ fn bind_addrs(listen: &str) -> Option<Vec<String>> {
     if ip.starts_with("127.") || ip.starts_with("169.254.") || ip == "0.0.0.0" {
         return None;
     }
-    Some(vec![format!("{ip}:{port}")])
+    // Loopback as well as the node's address.
+    //
+    // The health probe dials 127.0.0.1, and a router that only binds its
+    // routable address is not there — so it bound correctly, served nothing
+    // to the probe, and was restarted every fifteen seconds for failing a
+    // check that was looking in the wrong place. Loopback does not conflict
+    // with the metadata service's 169.254.169.254, which is the only address
+    // this was ever avoiding.
+    Some(vec![format!("{ip}:{port}"), format!("127.0.0.1:{port}")])
 }
 
 fn default_listen() -> String { "0.0.0.0:80".into() }
@@ -115,21 +123,28 @@ pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
     // is not known when the golden is built.
     let listener = match bind_addrs(&cfg.listen) {
         Some(addrs) => {
+            // The first that binds is the one served; the rest are spawned
+            // beside it. A router on its routable address and not on
+            // loopback passes no health check, and one on loopback alone
+            // serves nobody — it needs both.
+            let mut listeners = Vec::new();
             let mut last = None;
-            let mut bound = None;
             for a in &addrs {
                 match TcpListener::bind(a).await {
-                    Ok(l) => {
-                        bound = Some(l);
-                        break;
-                    }
+                    Ok(l) => listeners.push(l),
                     Err(e) => last = Some(e),
                 }
             }
-            match bound {
-                Some(l) => l,
-                None => return Err(last.expect("at least one address was tried").into()),
+            if listeners.is_empty() {
+                return Err(last.expect("at least one address was tried").into());
             }
+            // Everything after the first is served by its own task over the
+            // same routes.
+            for extra in listeners.drain(1..) {
+                let routes = table.clone();
+                tokio::spawn(async move { serve_on(extra, routes).await });
+            }
+            listeners.remove(0)
         }
         // `auto` that could not be resolved falls back to the wildcard, not
         // to the literal string. Binding "auto:80" is a DNS lookup of a word,
@@ -148,6 +163,15 @@ pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
 
     tokio::spawn(poll_routes(cfg.clone(), table.clone()));
 
+    serve_on(listener, table).await
+}
+
+/// Accept and demux, on one listener.
+///
+/// Factored out because the router listens on more than one address: its own,
+/// which clients reach, and loopback, which the health probe dials. One
+/// routing table, several front doors.
+async fn serve_on(listener: TcpListener, table: Table) -> anyhow::Result<()> {
     loop {
         let (conn, peer) = listener.accept().await?;
         let table = table.clone();
