@@ -16,4 +16,17 @@ deliberate commit of its own.
 - [x] #2 Commit Cargo.lock — un-ignore it, generate it on the build box
       (`cargo generate-lockfile`), commit, verify `cargo build --release --locked`
       and `cargo test --locked` via sc-build, request the golden.
-- [ ] #1 docs: README says systemd; a node has no systemd.
+- [ ] #3 docs rewritten from the code (covers #1 as well):
+  - [ ] README.md: what it is/does today, build (sc-build), every config key
+        with its default, ports, health endpoint (no metrics), how it ships
+        (stormcentral `service` golden under stormd, router-only config,
+        boot.d `start stormlb` in stormcos).
+  - [ ] docs/design.md: L2/L3 VIP design, router design; marked where the
+        shipped golden does not use it.
+  - [ ] Module doc comments: lib.rs (router missing), vrrp.rs (stale
+        "decoupled"/"VRRP wiring"), config.rs `bind`, main.rs, example TOML.
+  - [ ] File issues for gaps found (bare-LF /healthz, BGP reconcile only on
+        the 60 s keepalive tick, VRRP backup ignores priority / not tied to
+        backend health, VRRP needs `ip`/`arping` absent from the golden).
+- [ ] #1 docs: README says systemd; a node has no systemd — closed by #3.
+- [ ] #4 docs: a presentation of its purpose and functionality.
