@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### 2026-09-24
+- **build:** commit `Cargo.lock` (#2). It was gitignored, so no commit said
+  which dependency versions a golden was built from, and stormcentral's
+  `cargo build --release --locked` refused to build at all. Generated with
+  `cargo generate-lockfile` (cargo 1.95.0) on the build box; `cargo update`
+  is now a deliberate commit of its own.
+
 ### 2026-08-31
 - **feat(router):** the L7 half of inbound — a Host-header router over
   Gateway API HTTPRoutes, per stormpump docs/routing.md. Reads one request

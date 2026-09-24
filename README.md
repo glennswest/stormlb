@@ -69,9 +69,13 @@ priority-0 VRRP resign on shutdown; netlink-native VIP control.
 ## Build / test
 
 ```
-cargo build --release
-cargo test
+cargo build --release --locked
+cargo test --locked
 ```
+
+`Cargo.lock` is committed: goldens are built with `--locked` from an exact
+commit, so the lockfile is what says which dependency versions shipped.
+Change it only with a deliberate `cargo update` commit.
 
 ## Integration
 
