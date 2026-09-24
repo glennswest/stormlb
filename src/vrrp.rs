@@ -1,12 +1,14 @@
 //! VRRP v3 (RFC 5798) — virtual-router state machine + advertisement codec.
 //!
-//! This owns the L2 failover *logic*: which node holds the VIP and when it
-//! transitions Master/Backup. The privileged wire path (a raw IPPROTO_VRRP
-//! socket joining 224.0.0.18, plus gratuitous ARP on takeover) is intentionally
-//! decoupled — the [`VirtualRouter`] drives events, and the caller performs the
-//! actual VIP add/remove via [`crate::vip::VipController`]. This keeps the
-//! protocol logic unit-testable without root or a peer. See README "VRRP wiring"
-//! for the remaining socket work.
+//! [`VirtualRouter`] is the state machine alone — which node holds the VIP
+//! and when it transitions Master/Backup — so it is unit-testable without root
+//! or a peer. [`run`] is the wire path around it: a raw IPPROTO_VRRP socket
+//! joined to 224.0.0.18, advertisements while Master, the master-down timer
+//! while Backup, and VIP claim/release through [`crate::vip::VipController`].
+//!
+//! Known deviations from RFC 5798 (a Backup does not preempt a lower-priority
+//! Master, priority 0 is not handled, ownership ignores backend health) are
+//! glennswest/stormlb#7.
 
 use crate::vip::VipController;
 use anyhow::{Context, Result};

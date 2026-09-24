@@ -28,9 +28,8 @@ pub struct Vip {
     /// The VIP address (owned via VRRP or advertised via BGP).
     pub address: String,
     pub port: u16,
-    /// Address the L4 proxy binds. Defaults to `0.0.0.0` so the proxy works
-    /// whether or not the VIP is currently local (bind to the VIP once VRRP
-    /// ownership is wired).
+    /// Address the L4 proxy binds. Defaults to `0.0.0.0` so the proxy accepts
+    /// whether or not this node currently holds the VIP.
     #[serde(default = "default_bind")]
     pub bind: String,
 }

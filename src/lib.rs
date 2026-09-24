@@ -12,6 +12,10 @@
 //! - [`vrrp`]     — VRRP (RFC 5798) state machine for L2 VIP ownership/failover.
 //! - [`vip`]      — add/remove the VIP on an interface (Linux).
 //! - [`bgp`]      — BGP-anycast advertisement of the VIP (L3, active-active).
+//! - [`router`]   — the L7 Host-header router over Gateway API HTTPRoutes.
+//! - [`config`]   — the TOML config; `[vip]` and `[router]` are each optional.
+//!
+//! The shipped golden runs the router alone; see README "How it ships".
 
 pub mod balancer;
 pub mod bgp;

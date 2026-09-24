@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### 2026-09-24
+- **docs:** README rewritten from the code (#3, closes #1). Every flag and
+  config key with its default, the router's and L4 half's actual behaviour,
+  ports and endpoints (router `/healthz` only; no metrics), and how it ships:
+  the router-only stormcentral `service` golden under stormd, started by a
+  stormpump boot.d `start stormlb` line (not systemd). Design notes moved to
+  `docs/design.md`, marked where the code does not do it yet. Module docs
+  corrected (lib.rs lists `router`; vrrp.rs no longer says the wire path is
+  missing), and the example config gained `[router]`. The gaps found are
+  filed as #5 (bare-LF `/healthz`), #6 (BGP reconciles only every 60 s) and
+  #7 (VRRP preemption, priority 0, health, `ip`/`arping`).
 - **build:** commit `Cargo.lock` (#2). It was gitignored, so no commit said
   which dependency versions a golden was built from, and stormcentral's
   `cargo build --release --locked` refused to build at all. Generated with

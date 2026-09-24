@@ -1,4 +1,6 @@
-# stormlb example: kube-api VIP fronting three masters, L2 (VRRP) mode.
+# stormlb example: kube-api VIP fronting three masters, L2 (VRRP) mode, plus
+# the L7 router. Every key is listed in README "Configuration" with its default.
+# The shipped golden uses only `[router]` with `listen = "auto:80"`.
 
 [vip]
 address = "192.168.8.50"   # the VIP clients/kubelets target
@@ -27,10 +29,12 @@ expect_status = [200]
 enabled = true
 interface = "eth0"
 vrid = 51
-priority = 200             # highest live node becomes Master; 255 = address owner
+priority = 200             # 255 = address owner, starts Master; others start Backup
+                           # (no preemption from Backup yet: stormlb#7)
 advert_interval_secs = 1
 
-# L3 mode (phase 2): every node advertises the VIP /32, router ECMP = active-active.
+# L3 mode: every node with a healthy backend advertises the VIP /32; the
+# upstream router ECMP-hashes across them. 2-byte ASNs only.
 [bgp]
 enabled = false
 local_asn = 64512
@@ -38,3 +42,11 @@ router_id = "192.168.8.51"
 # [[bgp.peers]]
 # address = "192.168.8.1"
 # asn = 64512
+
+# The L7 Host-header router over HTTPRoutes. Present = enabled; alone, it is a
+# complete config (no [vip] needed).
+# [router]
+# listen = "auto:80"                     # node address + 127.0.0.1; default "0.0.0.0:80"
+# apiserver = "https://127.0.0.1:6443"
+# poll_secs = 5
+# insecure = true                        # stormcert's CA is not in a trust store yet

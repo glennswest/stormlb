@@ -67,8 +67,9 @@ async fn main() -> Result<()> {
     tokio::spawn(health::run(pool.clone(), cfg.health.clone()));
 
     // VIP presentation. L2 (VRRP) claims the VIP on the elected Master; L3 (BGP
-    // anycast) has every healthy node advertise the /32. Without either, we
-    // assume the VIP is already local / bind 0.0.0.0 (single-node / testing).
+    // anycast) has every node with a healthy backend advertise the /32.
+    // Without either, the VIP is assumed to be local already (single node,
+    // testing) and the balancer just listens on `vip.bind`.
     if cfg.vrrp.enabled {
         let iface = cfg.vrrp.interface.clone();
         let (vrid, prio, ai) = (
