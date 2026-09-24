@@ -13,7 +13,7 @@ deliberate commit of its own.
 
 ## Work plan
 
-- [ ] #2 Commit Cargo.lock — un-ignore it, generate it on the build box
+- [x] #2 Commit Cargo.lock — un-ignore it, generate it on the build box
       (`cargo generate-lockfile`), commit, verify `cargo build --release --locked`
       and `cargo test --locked` via sc-build, request the golden.
 - [ ] #1 docs: README says systemd; a node has no systemd.
