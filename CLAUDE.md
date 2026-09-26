@@ -42,3 +42,23 @@ deliberate commit of its own.
         Verified at 5095331: `cargo test --locked` (24 passed) and `cargo doc`
         with `-D warnings` via sc-build; Marp renders it to 12 slides. Slide
         overflow not checked visually (no browser on the session VM).
+- [ ] #8 test containers per stormcentral docs/test-standard.md (pattern:
+      stormcast `test/`). stormcentral's runner is not built yet
+      (stormcentral#27); the only test machine (192.168.30.2) is down.
+  - [ ] `test/`: own-workspace crate `stormlb-test` (lib + bin), static musl,
+        `FROM scratch` Containerfile (SUITE/COMMIT build args), Job YAML with
+        SA + namespaced Role + run-labelled ClusterRole (nodes read),
+        hostNetwork (the router dials the test's own backend listener).
+  - [ ] short: router /healthz, stormd supervising it (:180/metrics), an
+        HTTPRoute with `storm.io/backend` is routed, and 404s once deleted.
+  - [ ] medium: 400/404, /healthz unclaimed/claimed/CRLF (#5), Host case and
+        port, per-connection stickiness, streaming unbuffered, upgrade, large
+        body, 16 KiB head limit, dead backend, route update, backendRef via
+        Service+Endpoints (skip without a data plane), headless skipped,
+        many hosts, concurrency, stormd restarts unchanged, VIP half skip.
+  - [ ] long: waves sized from node allocatable CPU (API) and the fd limit;
+        route-programming, request latency, drain; residue and restarts.
+  - [ ] Hermetic harness (`test/tests/harness.rs`): the real router
+        (`stormlb::router::run`) against an in-memory apiserver, running the
+        actual suites; run via sc-build with `cd test && cargo test --locked`.
+  - [ ] README "Tests on a node", CHANGELOG, test/Cargo.lock via dev.
