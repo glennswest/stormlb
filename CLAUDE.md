@@ -70,3 +70,7 @@ deliberate commit of its own.
         `cargo build --release --locked && cargo test --locked` passes at
         091c2dc. #8 closed, golden requested. Not yet run on a node: needs
         stormcentral#41 and a reachable test machine.
+- [ ] #5 router `/healthz` answers with bare LF: write it with explicit CRLF
+      like the 400/404, fix the unit test's bare-LF literals, add a socket
+      test of the exact bytes. The harness's medium expectation flips
+      `healthz-crlf` to pass; README gaps, deck and medium.rs docs drop #5.
