@@ -24,7 +24,8 @@ interval_secs = 2
 timeout_secs = 2
 expect_status = [200]
 
-# L2 mode: one node owns the VIP (VRRP), sub-second failover.
+# L2 mode: one node owns the VIP (VRRP); failover after master-down
+# (3 x advert + skew, 3.6 s at advert_interval_secs = 1).
 [vrrp]
 enabled = true
 interface = "eth0"

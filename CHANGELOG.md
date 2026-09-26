@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### 2026-09-26
+- **docs:** `docs/presentation.md`, a 12-slide Marp deck on stormlb's purpose
+  and functionality (#4). It covers the problem, its place in stormcos (from
+  stormcentral's relationships graph), how it works, what ships versus what
+  is implemented or planned, interfaces, how it ships, and status. Linked
+  from the README.
+- **docs:** the README now says `start stormlb` is written only for the
+  stormcos `sno` profile; before, it implied every node. The example config
+  no longer claims sub-second VRRP failover (3.6 s at defaults).
 - **docs:** #3 verified on the build box: `cargo test --locked` (24 passed)
   and `cargo doc --no-deps --locked` with `-D warnings` clean; #3 and #1
   closed.

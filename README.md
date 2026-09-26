@@ -25,6 +25,9 @@ L4 half for Service traffic.
 
 Design notes (L2 vs L3, stormlb vs a DNS LB, why the router lives here) are in
 [docs/design.md](docs/design.md).
+A short deck on its purpose and functionality (Marp Markdown; render with
+`npx @marp-team/marp-cli docs/presentation.md`) is
+[docs/presentation.md](docs/presentation.md).
 
 ## Running it
 
@@ -234,8 +237,10 @@ stormcentral):
 - On a stormcos node there is no systemd: stormpump is PID 1. stormcos's
   `deploy/build-goldens.sh` writes a `spec stormlb` stanza into
   `/etc/stormpump/boot.d/40-services`. It is a container on the host network
-  profile, sharing UTS, with its data and log volumes. A `start stormlb`
-  line starts it. A node runs the router because it has that `start` line.
+  profile, sharing UTS, with its data and log volumes. On the `sno`
+  profile (the default) it also writes `start stormlb`. A node runs the
+  router because it has that `start` line; the `node` and `storage`
+  profiles get the spec without it.
   stormcos `deploy/image.toml` places the three goldens.
 
 ## Build and test
