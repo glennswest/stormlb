@@ -105,8 +105,7 @@ Unit-tested, and `tests/balancer.rs` drives round-robin and failover through the
 |---|---|
 | VRRP Backup preempting a lower-priority Master, priority 0, VIP following backend health | **planned**, #7 |
 | BGP reacting faster than the 60 s keepalive tick, waiting for Established, hold timer | **planned**, #6 |
-| CRLF on the router's own `/healthz` reply | **planned**, #5 |
-| Test containers per the stormcos test standard | **planned**, #8 |
+| Running the test container on test machines | **planned**, stormcentral#41 (the runner) |
 | 4-octet ASNs, MP-BGP, IPv6, netlink instead of `ip`/`arping` | follow-ups |
 | Wildcard hosts, path/header matches, TLS termination, 502 on a dead backend, apiserver auth | not done (router) |
 | Sub-second VRRP failover (config takes whole seconds) | not possible today |
@@ -164,14 +163,12 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 - **Version** 0.1.0 (pre-1.0; `Cargo.toml` is the only version location).
 - **Shipping:** the router, in every stormcos build that includes stormlb, and started on sno nodes.
 - **Not shipping:** the VIP half. On a single node the VIP is the node's own address, so nothing needs to float yet.
-- **Tests:** 24, run with `cargo test --locked` through `sc-build`.
+- **Tests:** 25 unit and integration tests (`cargo test --locked` through `sc-build`), plus the `test/` container: short, medium and long suites against the router on a node, proven by a hermetic harness until stormcentral runs them (stormcentral#41).
 
 **Open issues that matter**
 
-- #8: test containers per the stormcos test standard (P1)
 - #7: VRRP preemption and health-driven ownership, before the VIP half can ship to multi-master
 - #6: BGP reacts only on the 60 s tick
-- #5: `/healthz` uses bare LF; lenient clients, stormd included, accept it
 
 ---
 

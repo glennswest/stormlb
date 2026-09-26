@@ -221,15 +221,11 @@ async fn serve_conn(mut conn: TcpStream, table: &Table) -> anyhow::Result<()> {
     // http://127.0.0.1/healthz, and 127.0.0.1 is never a route's hostname.
     // A host a route *does* claim proxies /healthz to its backend untouched.
     if backend.is_none() && request_path(&head[..end]) == Some("/healthz") {
-        let body = "router alive
-";
+        // Explicit CRLF, like the 400 and 404: this literal once spanned
+        // source lines and sent bare LF, which only lenient clients accept.
+        let body = "router alive\n";
         let resp = format!(
-            "HTTP/1.1 200 OK
-content-type: text/plain
-content-length: {}
-connection: close
-
-{body}",
+            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
         );
         let _ = conn.write_all(resp.as_bytes()).await;
@@ -384,13 +380,25 @@ mod tests {
 
     #[test]
     fn the_healthz_path_is_read_from_the_request_line() {
-        assert_eq!(request_path(b"GET /healthz HTTP/1.1
-Host: x
+        assert_eq!(request_path(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n"), Some("/healthz"));
+        assert_eq!(request_path(b"GET /healthz?v=1 HTTP/1.1\r\n\r\n"), Some("/healthz"));
+    }
 
-"), Some("/healthz"));
-        assert_eq!(request_path(b"GET /healthz?v=1 HTTP/1.1
-
-"), Some("/healthz"));
+    /// The router's own answer, byte for byte, over a real socket: CRLF
+    /// line endings (stormlb#5), the body its content-length says.
+    #[tokio::test]
+    async fn healthz_on_an_unclaimed_host_is_crlf_on_the_wire() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(serve_on(l, Arc::new(RwLock::new(HashMap::new()))));
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").await.unwrap();
+        let mut got = Vec::new();
+        c.read_to_end(&mut got).await.unwrap();
+        assert_eq!(
+            String::from_utf8(got).unwrap(),
+            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 13\r\nconnection: close\r\n\r\nrouter alive\n"
+        );
     }
 
     #[test]

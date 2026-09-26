@@ -2,7 +2,7 @@
 //! each checked against what README "Router" says it does:
 //!
 //! - its own answers: 400 without a Host, a 404 naming the host, `/healthz`
-//!   on an unclaimed host (and its line endings, stormlb#5);
+//!   on an unclaimed host, and that its head ends in CRLF (stormlb#5);
 //! - routing: `/healthz` on a claimed host is proxied, Host is matched
 //!   case-insensitively with the port stripped, and a keep-alive connection
 //!   stays on its first backend (per connection, not per request);
@@ -127,12 +127,12 @@ async fn unknown_host(env: &Env) -> Outcome {
     }
 }
 
-/// HTTP/1.1 heads end in CRLF. Known not to (stormlb#5).
+/// HTTP/1.1 heads end in CRLF. They did not before stormlb#5.
 async fn healthz_crlf(env: &Env) -> Outcome {
     match fetch(&env.router, &env.host("unclaimed"), "/healthz").await {
         Ok(Some(r)) if r.crlf => Outcome::Pass("the head ends in CRLF CRLF".into()),
         Ok(Some(r)) => Outcome::Fail(format!(
-            "the /healthz head uses bare LF line endings (stormlb#5): {:?}",
+            "the /healthz head uses bare LF line endings (regressed: stormlb#5): {:?}",
             r.head
         )),
         Ok(None) => Outcome::Fail("closed with no response".into()),

@@ -227,8 +227,7 @@ async fn medium_passes_but_for_the_known_gaps() {
     let env = stand_up("medium", Duration::from_secs(600)).await;
     let mut r = Report::new();
     stormlb_test::run(&env, &mut r).await;
-    // healthz-crlf is stormlb#5: when it is fixed, this list changes.
-    expect(&r, &[("healthz-crlf", "fail"), ("stormd-no-restarts", "skip"), ("vip-half", "skip")]);
+    expect(&r, &[("stormd-no-restarts", "skip"), ("vip-half", "skip")]);
     assert_eq!(r.outcomes.len(), 22);
 }
 

@@ -258,11 +258,12 @@ issue here. `Cargo.lock` is committed, and `cargo update` is a deliberate
 commit of its own. A new golden is requested with
 `stormcentral component build stormlb --url http://stormcentral.g8.lo`.
 
-Tests (24): config parsing and defaults, pool round-robin and health
+Tests (25): config parsing and defaults, pool round-robin and health
 filtering, TCP health check, the VRRP state machine and advertisement
 encode/parse/checksum, BGP OPEN/UPDATE/withdraw encoding, router header
-parsing, and an integration test (`tests/balancer.rs`) for round-robin plus
-failover through the real L4 proxy. VRRP and BGP on the wire (raw socket,
+parsing, the router's own `/healthz` bytes on a real socket, and an
+integration test (`tests/balancer.rs`) for round-robin plus failover through
+the real L4 proxy. VRRP and BGP on the wire (raw socket,
 iproute2, a real peer) are not covered by tests.
 
 ### Tests on a node: the test container
@@ -277,7 +278,7 @@ musl) and run as a Job by [`test/stormlb-test.yaml`](test/stormlb-test.yaml).
 | Suite | Budget | What it proves |
 |---|---|---|
 | `short` | < 2 min | `/healthz` answers; stormd (`:180/metrics`) reports stormlb running; an HTTPRoute's hostname reaches its backend, and is a 404 again once deleted. |
-| `medium` | < 30 min | 400 without a Host, the 404 that names the host, `/healthz` on unclaimed and claimed hosts and its line endings (#5), Host case and port, per-connection routing, a streamed response not held back, an Upgrade as a two-way pipe, an 8 MiB body, the 16 KiB head limit, a dead backend closing with no response, a route update, a backendRef through a Service (skip without a Service data plane), a headless Service's route skipped, 50 hosts under concurrent load, deleted routes back to 404, no restart or crash under stormd. The VIP half is reported skip: it is not shipped. |
+| `medium` | < 30 min | 400 without a Host, the 404 that names the host, `/healthz` on unclaimed and claimed hosts and its CRLF line endings, Host case and port, per-connection routing, a streamed response not held back, an Upgrade as a two-way pipe, an 8 MiB body, the 16 KiB head limit, a dead backend closing with no response, a route update, a backendRef through a Service (skip without a Service data plane), a headless Service's route skipped, 50 hosts under concurrent load, deleted routes back to 404, no restart or crash under stormd. The VIP half is reported skip: it is not shipped. |
 | `long` | the night window | Waves sized from the node's allocatable CPU (read from the API) and the container's open-file limit. Each wave creates routes, holds connections at that size, drains, and checks residue. Each `wave-<n>` line carries route-programming time, request p50/p99, requests/s, drain time, leftovers, restarts and idle latency. `trend` fails on the first wave that is slower than the first wave of its size. |
 
 - **Backends** are listeners in the test pod. The Job is `hostNetwork`, and
@@ -310,8 +311,6 @@ musl) and run as a Job by [`test/stormlb-test.yaml`](test/stormlb-test.yaml).
 
 What the code does not do yet, which older docs implied it did:
 
-- [#5](https://github.com/glennswest/stormlb/issues/5): `/healthz` answers
-  with bare-LF line endings. Lenient clients, stormd included, accept it.
 - [#6](https://github.com/glennswest/stormlb/issues/6): BGP reconciles
   announce/withdraw only on the 60 s keepalive tick. It doesn't wait for
   Established or enforce a hold timer.

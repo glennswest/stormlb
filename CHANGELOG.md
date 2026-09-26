@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### 2026-09-26
+- **fix(router):** `/healthz` now answers with CRLF line endings, like the
+  router's 400 and 404 (#5). The response literal spanned source lines and
+  sent bare LF, which only lenient clients (curl, stormd's probe) accept; a
+  strict one would have failed the probe and had stormd restart a healthy
+  router. A new test checks the exact bytes over a socket, the old test's
+  bare-LF request literals are CRLF, and the test container's medium suite
+  now expects `healthz-crlf` to pass.
 - **test:** stormlb's test container (#8), per stormcentral
   `docs/test-standard.md`: `test/` is an own-workspace crate built
   `FROM scratch` into `stormlb-test-<suite>`, with a Job template
