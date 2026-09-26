@@ -42,7 +42,7 @@ deliberate commit of its own.
         Verified at 5095331: `cargo test --locked` (24 passed) and `cargo doc`
         with `-D warnings` via sc-build; Marp renders it to 12 slides. Slide
         overflow not checked visually (no browser on the session VM).
-- [ ] #8 test containers per stormcentral docs/test-standard.md (pattern:
+- [x] #8 test containers per stormcentral docs/test-standard.md (pattern:
       stormcast `test/`). stormcentral's runner is not built yet (filed
       stormcentral#41); the only test machine was unreachable on 2026-09-26.
   - [x] `test/`: own-workspace crate `stormlb-test` (lib + bin), static musl,
@@ -65,5 +65,8 @@ deliberate commit of its own.
   - [x] Harness passes on dev at 93d82e6 (`cd test && cargo test --locked`:
         11 unit + 3 harness; short 5, medium 22, long 4 waves). The first
         run hit a stack overflow (16 KiB read array in nested futures), fixed.
-  - [ ] Image: podman build of test/Containerfile on dev, smoke run (no env
-        -> exit 2). Then close #8, request golden.
+  - [x] Image: podman build of test/Containerfile on dev at 93d82e6 (5.9 MB,
+        scratch, labels set); run with no env -> JSON line, exit 2. Root
+        `cargo build --release --locked && cargo test --locked` passes at
+        091c2dc. #8 closed, golden requested. Not yet run on a node: needs
+        stormcentral#41 and a reachable test machine.
