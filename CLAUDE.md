@@ -34,3 +34,8 @@ deliberate commit of its own.
         b8ba1a7. #3 and #1 closed, golden requested.
 - [x] #1 docs: README says systemd; a node has no systemd — closed by #3.
 - [ ] #4 docs: a presentation of its purpose and functionality.
+  - [ ] `docs/presentation.md`, Marp Markdown, 8–15 slides, drawn from the
+        README/design.md and checked against the code: purpose, place in
+        stormcos (stormcentral relationships), how it works (diagram), what
+        works today vs planned, interfaces, how it ships, status/open issues.
+  - [ ] Link from README, CHANGELOG, sc-build, close #4, request golden.
