@@ -1,0 +1,111 @@
+# stormlb-test-<suite>: how stormcentral runs stormlb's tests on a test
+# machine, per stormcentral docs/test-standard.md.
+#
+# Test metadata (what the runner matches against the machine):
+#   suites:   short (< 2 min), medium (< 30 min), long (the night window)
+#   requires: []            (no hardware. On a node that does not start
+#                            stormlb, i.e. stormcos profiles other than sno,
+#                            every suite reports one skip, never a pass.)
+#   hostNetwork: true       (the suites' backends listen in this pod, and the
+#                            router dials them at this node's address, the
+#                            same way it dials a node service at 127.0.0.1)
+#   api:      namespaced: HTTPRoutes, Services, Endpoints in the run's
+#             namespace. Cluster-scoped read: nodes (the long suite sizes its
+#             waves from allocatable CPU).
+#   targets:  the router at STORM_NODE:80, stormd at STORM_NODE:180
+#   external: none
+#
+# The runner creates the namespace test-stormlb-<suite>-<run id>, fills in
+# NAMESPACE / RUN_ID / NODE / API / SUITE / TIMEOUT / TIMEOUT_PLUS_MARGIN /
+# COMMIT / IMAGE below, applies this, waits for the Job, collects /results
+# with the logs, and deletes the namespace, then the cluster-scoped objects
+# by their storm.io/test-run label.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stormlb-test
+  namespace: ${NAMESPACE}
+  labels: { storm.io/test-run: "${RUN_ID}" }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: stormlb-test
+  namespace: ${NAMESPACE}
+  labels: { storm.io/test-run: "${RUN_ID}" }
+rules:
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["create", "get", "list", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["create", "get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: stormlb-test
+  namespace: ${NAMESPACE}
+  labels: { storm.io/test-run: "${RUN_ID}" }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: stormlb-test }
+subjects:
+  - { kind: ServiceAccount, name: stormlb-test, namespace: "${NAMESPACE}" }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: stormlb-test-${RUN_ID}
+  labels: { storm.io/test-run: "${RUN_ID}" }
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: stormlb-test-${RUN_ID}
+  labels: { storm.io/test-run: "${RUN_ID}" }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: "stormlb-test-${RUN_ID}" }
+subjects:
+  - { kind: ServiceAccount, name: stormlb-test, namespace: "${NAMESPACE}" }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stormlb-test
+  namespace: ${NAMESPACE}
+  labels: { storm.io/test-run: "${RUN_ID}" }
+spec:
+  backoffLimit: 0            # a retry would hide the finding
+  activeDeadlineSeconds: ${TIMEOUT_PLUS_MARGIN}
+  template:
+    metadata:
+      labels: { storm.io/test-run: "${RUN_ID}" }
+    spec:
+      restartPolicy: Never
+      serviceAccountName: stormlb-test
+      automountServiceAccountToken: true
+      hostNetwork: true
+      containers:
+        - name: stormlb-test
+          image: ${IMAGE}
+          env:
+            - { name: STORM_API, value: "${API}" }
+            - { name: STORM_NAMESPACE, value: "${NAMESPACE}" }
+            - { name: STORM_RUN_ID, value: "${RUN_ID}" }
+            - { name: STORM_NODE, value: "${NODE}" }
+            - { name: STORM_SUITE, value: "${SUITE}" }
+            - { name: STORM_TIMEOUT, value: "${TIMEOUT}" }
+            - { name: STORM_COMPONENT, value: stormlb }
+            - { name: STORM_COMMIT, value: "${COMMIT}" }
+          volumeMounts:
+            - { name: results, mountPath: /results }
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - { name: results, emptyDir: {} }

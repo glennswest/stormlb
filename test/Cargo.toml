@@ -1,0 +1,31 @@
+[package]
+name = "stormlb-test"
+version = "0.1.0"
+edition = "2021"
+description = "stormlb's test container: short, medium and long suites against the router on a running node."
+license = "Apache-2.0"
+publish = false
+
+# Its own workspace, as stormcast's is: the golden's `cargo build --release
+# --locked` at the repo root never sees it, and it has its own Cargo.lock
+# (seeded from the root one, so the versions match the shipped binary's).
+[workspace]
+
+[lib]
+name = "stormlb_test"
+path = "src/lib.rs"
+
+[[bin]]
+name = "stormlb-test"
+path = "src/main.rs"
+
+# Only crates stormlb itself already uses. The router under test is never
+# linked into the image: it is reached over the network, on the node.
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "macros", "sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde_json = "1"
+
+# The hermetic harness (tests/harness.rs) runs the real router in-process.
+[dev-dependencies]
+stormlb = { path = ".." }

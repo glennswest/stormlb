@@ -1,0 +1,28 @@
+# stormlb-test-<suite>: stormlb's test container, per stormcentral
+# docs/test-standard.md. One per suite, built from test/, run as a Job in the
+# run's own namespace (test/stormlb-test.yaml).
+#
+#   podman build -f test/Containerfile --build-arg SUITE=short \
+#     --build-arg COMMIT=$(git rev-parse HEAD) -t stormlb-test-short .
+#
+# The context is the repo root: the test crate's harness depends on the crate
+# by path, so cargo needs its manifest to resolve the lockfile (the harness
+# itself is not built into the image). The binary is static (musl) and needs
+# nothing under it, so the image is scratch: it verifies the apiserver with
+# the ServiceAccount's mounted ca.crt, not a trust store.
+FROM docker.io/library/rust:1-alpine AS build
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src src
+COPY test test
+RUN cd test && cargo build --release --locked --bin stormlb-test
+
+FROM scratch
+ARG SUITE=short
+ARG COMMIT=unknown
+LABEL storm.io/test-of="stormlb" storm.io/test-commit="${COMMIT}" storm.io/test-suite="${SUITE}"
+# The runner sets STORM_SUITE; this is the image's own suite when it does not.
+ENV STORM_SUITE=${SUITE}
+COPY --from=build /src/test/target/release/stormlb-test /test
+ENTRYPOINT ["/test"]
