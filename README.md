@@ -265,6 +265,47 @@ parsing, and an integration test (`tests/balancer.rs`) for round-robin plus
 failover through the real L4 proxy. VRRP and BGP on the wire (raw socket,
 iproute2, a real peer) are not covered by tests.
 
+### Tests on a node: the test container
+
+[`test/`](test/) is stormlb's test container, per stormcentral
+`docs/test-standard.md`. It tests what a node runs, which is the router,
+from outside, through the apiserver and port 80. It is a crate of its own
+(own workspace and `Cargo.lock`, never part of the golden's build), built
+into `stormlb-test-<suite>` by `test/Containerfile` (`FROM scratch`, static
+musl) and run as a Job by [`test/stormlb-test.yaml`](test/stormlb-test.yaml).
+
+| Suite | Budget | What it proves |
+|---|---|---|
+| `short` | < 2 min | `/healthz` answers; stormd (`:180/metrics`) reports stormlb running; an HTTPRoute's hostname reaches its backend, and is a 404 again once deleted. |
+| `medium` | < 30 min | 400 without a Host, the 404 that names the host, `/healthz` on unclaimed and claimed hosts and its line endings (#5), Host case and port, per-connection routing, a streamed response not held back, an Upgrade as a two-way pipe, an 8 MiB body, the 16 KiB head limit, a dead backend closing with no response, a route update, a backendRef through a Service (skip without a Service data plane), a headless Service's route skipped, 50 hosts under concurrent load, deleted routes back to 404, no restart or crash under stormd. The VIP half is reported skip: it is not shipped. |
+| `long` | the night window | Waves sized from the node's allocatable CPU (read from the API) and the container's open-file limit. Each wave creates routes, holds connections at that size, drains, and checks residue. Each `wave-<n>` line carries route-programming time, request p50/p99, requests/s, drain time, leftovers, restarts and idle latency. `trend` fails on the first wave that is slower than the first wave of its size. |
+
+- **Backends** are listeners in the test pod. The Job is `hostNetwork`, and
+  the routes name the pod's backends in `storm.io/backend`, the same path a
+  node service uses. The suites create only HTTPRoutes, Services and
+  Endpoints, all in the run's namespace and labelled `storm.io/test-run`,
+  and delete them at the end (`cleanup`).
+- **Environment:** the standard's `STORM_*` variables. The router defaults to
+  `STORM_NODE:80` and stormd to `STORM_NODE:180`; `STORMLB_ROUTER` and
+  `STORMLB_STORMD` (`none` for no stormd) override them. `STORMLB_ROUTE_WAIT`
+  (default 30 s) is how long a route change may take, and `STORMLB_SETTLE`
+  (12 s) is how long to wait before calling something *not* routed.
+- **Where stormlb isn't started:** stormcos starts it on the `sno` profile
+  only. When neither the router nor its stormd answers, a suite reports one
+  `stormlb-started` skip, never a pass. If stormd answers and the router
+  doesn't, that's a failure.
+- **Not observable yet:** the router's own memory and file descriptors.
+  stormd's open `/metrics` reports stormd's, not the process it supervises.
+- **The harness:** `test/tests/harness.rs` runs the three suites against the
+  real router (`stormlb::router::run`) and a small in-memory apiserver, all
+  on loopback. That's how the container's own code is tested:
+
+  ```
+  sc-build 'cd test && cargo test --locked'
+  ```
+
+  stormcentral does not run these Jobs yet: the runner is stormcentral#41.
+
 ## Gaps (known and filed)
 
 What the code does not do yet, which older docs implied it did:

@@ -3,6 +3,17 @@
 ## [Unreleased]
 
 ### 2026-09-26
+- **test:** stormlb's test container (#8), per stormcentral
+  `docs/test-standard.md`: `test/` is an own-workspace crate built
+  `FROM scratch` into `stormlb-test-<suite>`, with a Job template
+  (`test/stormlb-test.yaml`: namespaced ServiceAccount, hostNetwork). It has
+  three suites against the router on a node. `short` checks `/healthz`,
+  stormd's view, and a route that appears and goes. `medium` checks every
+  documented behaviour and failure path. `long` runs waves sized from the
+  node's CPUs, with a trend. They print JSON lines, exit 0/1/2, and clean up
+  by `storm.io/test-run`. `test/tests/harness.rs` runs all three against the
+  real router and an in-memory apiserver in `sc-build`. The runner is
+  stormcentral#41.
 - **docs:** `docs/presentation.md`, a 12-slide Marp deck on stormlb's purpose
   and functionality (#4). It covers the problem, its place in stormcos (from
   stormcentral's relationships graph), how it works, what ships versus what
