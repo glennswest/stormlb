@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 2026-09-26
+- **docs:** #3 verified on the build box: `cargo test --locked` (24 passed)
+  and `cargo doc --no-deps --locked` with `-D warnings` clean; #3 and #1
+  closed.
+
 ### 2026-09-24
 - **docs:** README rewritten from the code (#3, closes #1). Every flag and
   config key with its default, the router's and L4 half's actual behaviour,
