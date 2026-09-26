@@ -61,10 +61,10 @@ impl Conn {
 
     /// Read what arrives within `wait` into `buf`. `Ok(0)` is the peer's EOF.
     pub async fn fill(&mut self, wait: Duration) -> io::Result<usize> {
-        let mut tmp = [0u8; 16384];
-        let n = timeout(wait, self.s.read(&mut tmp)).await.map_err(timed_out)??;
-        self.buf.extend_from_slice(&tmp[..n]);
-        Ok(n)
+        // Straight into the heap buffer: a read array here would sit in
+        // every future that awaits this, several deep.
+        self.buf.reserve(16384);
+        timeout(wait, self.s.read_buf(&mut self.buf)).await.map_err(timed_out)?
     }
 
     /// One response. `None` when the peer closed without sending a byte.

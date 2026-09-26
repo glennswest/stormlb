@@ -61,7 +61,7 @@ impl Backend {
 async fn serve(mut s: TcpStream, name: &str, hits: &AtomicU64) -> std::io::Result<()> {
     let _ = s.set_nodelay(true);
     let mut buf = Vec::new();
-    let mut tmp = [0u8; 65536];
+    let mut tmp = vec![0u8; 65536];
     let mut nreq = 0u64;
     loop {
         let end = loop {

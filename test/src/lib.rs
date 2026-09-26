@@ -37,9 +37,11 @@ pub async fn run(env: &Env, r: &mut Report) {
         return;
     }
     match env.suite.as_str() {
-        "short" => short::run(env, r).await,
-        "medium" => medium::run(env, r).await,
-        "long" => long::run(env, r).await,
+        // Boxed: each suite is one large future, and a test runtime polls it
+        // on a small thread stack.
+        "short" => Box::pin(short::run(env, r)).await,
+        "medium" => Box::pin(medium::run(env, r)).await,
+        "long" => Box::pin(long::run(env, r)).await,
         other => {
             r.record("suite", Outcome::Infra(format!("STORM_SUITE {other:?} is not short, medium or long")), 0, None);
         }
