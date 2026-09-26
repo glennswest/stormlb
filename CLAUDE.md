@@ -43,22 +43,27 @@ deliberate commit of its own.
         with `-D warnings` via sc-build; Marp renders it to 12 slides. Slide
         overflow not checked visually (no browser on the session VM).
 - [ ] #8 test containers per stormcentral docs/test-standard.md (pattern:
-      stormcast `test/`). stormcentral's runner is not built yet
-      (stormcentral#27); the only test machine (192.168.30.2) is down.
-  - [ ] `test/`: own-workspace crate `stormlb-test` (lib + bin), static musl,
+      stormcast `test/`). stormcentral's runner is not built yet (filed
+      stormcentral#41); the only test machine was unreachable on 2026-09-26.
+  - [x] `test/`: own-workspace crate `stormlb-test` (lib + bin), static musl,
         `FROM scratch` Containerfile (SUITE/COMMIT build args), Job YAML with
         SA + namespaced Role + run-labelled ClusterRole (nodes read),
         hostNetwork (the router dials the test's own backend listener).
-  - [ ] short: router /healthz, stormd supervising it (:180/metrics), an
+  - [x] short: router /healthz, stormd supervising it (:180/metrics), an
         HTTPRoute with `storm.io/backend` is routed, and 404s once deleted.
-  - [ ] medium: 400/404, /healthz unclaimed/claimed/CRLF (#5), Host case and
+  - [x] medium: 400/404, /healthz unclaimed/claimed/CRLF (#5), Host case and
         port, per-connection stickiness, streaming unbuffered, upgrade, large
         body, 16 KiB head limit, dead backend, route update, backendRef via
         Service+Endpoints (skip without a data plane), headless skipped,
         many hosts, concurrency, stormd restarts unchanged, VIP half skip.
-  - [ ] long: waves sized from node allocatable CPU (API) and the fd limit;
+  - [x] long: waves sized from node allocatable CPU (API) and the fd limit;
         route-programming, request latency, drain; residue and restarts.
-  - [ ] Hermetic harness (`test/tests/harness.rs`): the real router
+  - [x] Hermetic harness (`test/tests/harness.rs`): the real router
         (`stormlb::router::run`) against an in-memory apiserver, running the
         actual suites; run via sc-build with `cd test && cargo test --locked`.
-  - [ ] README "Tests on a node", CHANGELOG, test/Cargo.lock via dev.
+  - [x] README "Tests on a node", CHANGELOG, test/Cargo.lock via dev.
+  - [x] Harness passes on dev at 93d82e6 (`cd test && cargo test --locked`:
+        11 unit + 3 harness; short 5, medium 22, long 4 waves). The first
+        run hit a stack overflow (16 KiB read array in nested futures), fixed.
+  - [ ] Image: podman build of test/Containerfile on dev, smoke run (no env
+        -> exit 2). Then close #8, request golden.
