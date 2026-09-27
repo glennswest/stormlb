@@ -277,9 +277,24 @@ iproute2, a real peer) are not covered by tests.
 [`test/`](test/) is stormlb's test container, per stormcentral
 `docs/test-standard.md`. It tests what a node runs, which is the router,
 from outside, through the apiserver and port 80. It is a crate of its own
-(own workspace and `Cargo.lock`, never part of the golden's build), built
-into `stormlb-test-<suite>` by `test/Containerfile` (`FROM scratch`, static
-musl) and run as a Job by [`test/stormlb-test.yaml`](test/stormlb-test.yaml).
+(own workspace and `Cargo.lock`, never part of the golden's build). It is
+built by `test/Containerfile` (`FROM scratch`, static musl, compiled inside
+`podman build`; there is no `test/build.sh` yet). stormcentral runs it with
+`stormcentral test run stormlb <short|medium|long>`: one image for every suite,
+started as `/test <suite>` with the standard's `STORM_*` environment, in the
+runner's own Job. Results are the JSON lines on stdout, read from the pod log.
+
+The runner uses its own Job spec: ServiceAccount `storm-test`, a Role
+scoped to the run's namespace, and nothing else. It never reads
+[`test/stormlb-test.yaml`](test/stormlb-test.yaml). That file records what the
+suites need and is a template for running one by hand. Two of those needs the
+runner can't grant yet ([#11](https://github.com/glennswest/stormlb/issues/11)):
+
+- **`hostNetwork`** (stormcentral#74). Without it, the router dials the test's
+  backends at the pod IP. The routed checks then pass only where the host can
+  route to pod IPs, and that is not verified on any test machine.
+- **`nodes` read** (stormcentral#55). Without it, the long suite sizes its
+  waves from the container's CPUs, and its `capacity` line says so.
 
 | Suite | Budget | What it proves |
 |---|---|---|
@@ -287,8 +302,8 @@ musl) and run as a Job by [`test/stormlb-test.yaml`](test/stormlb-test.yaml).
 | `medium` | < 30 min | 400 without a Host, the 404 that names the host, `/healthz` on unclaimed and claimed hosts and its CRLF line endings, Host case and port, per-connection routing, a streamed response not held back, an Upgrade as a two-way pipe, an 8 MiB body, the 16 KiB head limit, a dead backend closing with no response, a route update, a backendRef through a Service (skip without a Service data plane), a headless Service's route skipped, 50 hosts under concurrent load, deleted routes back to 404, no restart or crash under stormd. The VIP half is reported skip: it is not shipped. |
 | `long` | the night window | Waves sized from the node's allocatable CPU (read from the API) and the container's open-file limit. Each wave creates routes, holds connections at that size, drains, and checks residue. Each `wave-<n>` line carries route-programming time, request p50/p99, requests/s, drain time, leftovers, restarts and idle latency. `trend` fails on the first wave that is slower than the first wave of its size. |
 
-- **Backends** are listeners in the test pod. The Job is `hostNetwork`, and
-  the routes name the pod's backends in `storm.io/backend`, the same path a
+- **Backends** are listeners in the test pod. They are meant to be reached
+  on the node's address (`hostNetwork`, above), and the routes name the pod's backends in `storm.io/backend`, the same path a
   node service uses. The suites create only HTTPRoutes, Services and
   Endpoints, all in the run's namespace and labelled `storm.io/test-run`,
   and delete them at the end (`cleanup`).
@@ -311,7 +326,7 @@ musl) and run as a Job by [`test/stormlb-test.yaml`](test/stormlb-test.yaml).
   sc-build 'cd test && cargo test --locked'
   ```
 
-  stormcentral does not run these Jobs yet: the runner is stormcentral#41.
+  None of the three suites has been run on a test machine yet (#11).
 
 ## Gaps (known and filed)
 
@@ -329,5 +344,9 @@ What the code does not do yet, which older docs implied it did:
 - [#7](https://github.com/glennswest/stormlb/issues/7): a VRRP Backup never
   preempts a lower-priority Master, and priority 0 isn't handled. VIP
   ownership ignores backend health. It relies on `ip` and `arping` binaries.
+- [#11](https://github.com/glennswest/stormlb/issues/11): the test
+  container doesn't match stormcentral's shipped runner: no `hostNetwork`,
+  no `nodes` read, and the Job template is unused. It hasn't run on a test
+  machine yet.
 - Earlier follow-ups: 4-octet ASNs and multiprotocol BGP, a priority-0 VRRP
   resign on shutdown, and netlink-native VIP control.

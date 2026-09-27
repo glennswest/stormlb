@@ -11,7 +11,8 @@
 //! - `long` (the night window): waves of routes and connections at the
 //!   machine's capacity, measured for slowdown and residue across waves.
 //!
-//! The backends are listeners in this container (the Job is `hostNetwork`),
+//! The backends are listeners in this container (meant to run `hostNetwork`;
+//! stormcentral's runner does not grant that yet, #11),
 //! named by the route's `storm.io/backend` — the same path a node service
 //! uses — so nothing but API objects is created, all in the run's namespace
 //! and labelled `storm.io/test-run`. The VIP half (L4, VRRP, BGP) is not

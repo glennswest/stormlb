@@ -1,5 +1,9 @@
-# stormlb-test-<suite>: how stormcentral runs stormlb's tests on a test
-# machine, per stormcentral docs/test-standard.md.
+# stormlb-test-<suite>: what stormlb's tests need on a test machine, per
+# stormcentral docs/test-standard.md, and a template for running a suite by
+# hand. stormcentral's runner (`stormcentral test run stormlb <suite>`) does NOT
+# read this file: it makes its own Job, SA storm-test, with a namespaced Role
+# only, running `/test <suite>`. It can't grant the hostNetwork or the nodes read
+# below yet (stormcentral#74, #55; stormlb#11).
 #
 # Test metadata (what the runner matches against the machine):
 #   suites:   short (< 2 min), medium (< 30 min), long (the night window)
@@ -15,11 +19,11 @@
 #   targets:  the router at STORM_NODE:80, stormd at STORM_NODE:180
 #   external: none
 #
-# The runner creates the namespace test-stormlb-<suite>-<run id>, fills in
+# Run by hand: create the namespace test-stormlb-<suite>-<run id>, fill in
 # NAMESPACE / RUN_ID / NODE / API / SUITE / TIMEOUT / TIMEOUT_PLUS_MARGIN /
-# COMMIT / IMAGE below, applies this, waits for the Job, collects /results
-# with the logs, and deletes the namespace, then the cluster-scoped objects
-# by their storm.io/test-run label.
+# COMMIT / IMAGE below, apply this, wait for the Job, read the JSON lines
+# from its log, then delete the namespace and the cluster-scoped objects by
+# their storm.io/test-run label.
 ---
 apiVersion: v1
 kind: ServiceAccount

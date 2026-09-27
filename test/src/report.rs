@@ -36,8 +36,9 @@ impl Default for Report {
 
 impl Report {
     pub fn new() -> Report {
-        // `/results` is the runner's volume; without it (a hand run, the
-        // harness) the lines still go to stdout.
+        // Every line goes to stdout, which is what stormcentral's runner reads
+        // (the pod log). `/results` is written too when a volume is mounted
+        // there; the runner mounts none.
         let file = OpenOptions::new().create(true).append(true).open("/results/results.jsonl").ok();
         Report { pass: 0, fail: 0, skip: 0, infra: 0, file, outcomes: Vec::new() }
     }

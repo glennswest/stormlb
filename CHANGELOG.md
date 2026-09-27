@@ -3,6 +3,20 @@
 ## [Unreleased]
 
 ### 2026-09-27
+- **docs:** second refresh. No stormlb code changed since the first. Config
+  keys, defaults and ports were re-checked against `config.rs`, `router.rs`
+  and `main.rs` and still match. What moved is stormcentral: its test runner
+  shipped (`stormcentral test run stormlb <suite>`), and it doesn't run
+  `test/` the way the docs said. It builds one image with no build-args,
+  starts `/test <suite>` in its own Job (SA `storm-test`, namespaced Role
+  only), reads results from the pod log, and never reads
+  `test/stormlb-test.yaml`. So stormlb's suites get no `hostNetwork` and no
+  `nodes` read. Filed #11, stormcentral#74 (a suite cannot ask for
+  hostNetwork); the `nodes` read is stormcentral#55. Updated: README "Tests
+  on a node" and gaps, the deck, and the headers of `test/Containerfile` and
+  `test/stormlb-test.yaml` (now a hand-run template). Also updated the
+  `test/src` doc comments that said the Job is hostNetwork and that
+  `/results` is the runner's volume.
 - **docs:** refreshed from the code for everything since 2026-09-18 (the
   router's `auto`/loopback listen, `Cargo.lock`, the test container, the CRLF
   `/healthz`). The facts taken from other components were re-checked at

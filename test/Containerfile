@@ -1,6 +1,7 @@
-# stormlb-test-<suite>: stormlb's test container, per stormcentral
-# docs/test-standard.md. One per suite, built from test/, run as a Job in the
-# run's own namespace (test/stormlb-test.yaml).
+# stormlb's test container, per stormcentral docs/test-standard.md. The
+# runner builds it once per commit with no build-args (so SUITE/COMMIT below
+# keep their defaults) and starts `/test <suite>` with STORM_SUITE set. A hand
+# build can still label the image per suite:
 #
 #   podman build -f test/Containerfile --build-arg SUITE=short \
 #     --build-arg COMMIT=$(git rev-parse HEAD) -t stormlb-test-short .

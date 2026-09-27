@@ -1,0 +1,7 @@
+Found while refreshing stormlb's docs against the runner that shipped today (02098e0, 321bade, 20a570b).
+
+**Problem.** `docs/test-standard.md` says: *"A test that needs the node itself (not the API) says so in its metadata and runs privileged, opt-in."* The runner has no such opt-in. `src/testruns.rs` `job_manifest` always builds the same pod spec: `serviceAccountName: storm-test`, `restartPolicy: Never`, one container running `/test <suite>`. It never sets `hostNetwork`, `securityContext` or anything else from the component. Nothing reads a component's own Job template either, so stormlb's `test/stormlb-test.yaml` (which asks for `hostNetwork: true`) is unused.
+
+**Who it blocks.** stormlb's suites test its router, which runs under stormd on the host network. Each suite starts backend listeners inside the test container, points an HTTPRoute at them (`storm.io/backend: <ip>:<port>`), and has the router dial them. With `hostNetwork` that address is the node's. Without it, the address is the pod IP, and the router reaches the backends only if the host can route to pod IPs on that test machine. That has not been checked on any machine. If the host can't route there, every routed check fails as "backend unreachable", not as "could not run".
+
+**Proposed resolution.** Handle this with the same per-component declaration as #55 (e.g. `test/requires.toml`): add a `host_network = true` key (and `privileged`, which the standard mentions). The runner sets these on the pod spec. Keep both off unless declared.
