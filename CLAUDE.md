@@ -78,7 +78,7 @@ deliberate commit of its own.
       `healthz_on_an_unclaimed_host_is_crlf_on_the_wire`), cargo doc -D
       warnings, and the test crate (11 unit + 3 harness; medium now asserts
       `healthz-crlf` passes).
-- [ ] Docs refresh from the code, changes since 2026-09-18 (2026-09-27).
+- [x] Docs refresh from the code, changes since 2026-09-18 (2026-09-27).
       Cross-component facts re-checked at today's HEADs (stormcentral
       components/stormcos.toml + config, stormcos build-goldens.sh boot.d and
       apiserver flags, stormd port+100, rustkube auth): unchanged except what
@@ -86,3 +86,6 @@ deliberate commit of its own.
       only against sno's --dev-anonymous-admin), #10 (insecure = false cannot
       work: webpki roots only, no CA-file key). Fix README `[router]`/route
       table, router.rs field docs, example, design.md, deck; CHANGELOG.
+      Done in fd72dd5; sc-build passed there (release build, 25 tests,
+      cargo doc -D warnings). #9 P2, #10 P3. Open now: #6, #7 (P2), #9 (P2),
+      #10 (P3).
