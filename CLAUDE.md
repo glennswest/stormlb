@@ -107,3 +107,6 @@ deliberate commit of its own.
     stormcentral#74). sc-build passed there: release build, 25 tests,
     cargo doc -D warnings, test crate 11 unit + 3 harness and its cargo doc.
     Open now: #6, #7, #9, #11 (P2), #10 (P3).
+    Golden NOT built yet: three `stormcentral component build stormlb`
+    requests at b9da689 were each interrupted by a stormcentral restart
+    (builds 6c320b5e1a19, 39c66777f85d and the first). Request it again.
