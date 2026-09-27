@@ -89,3 +89,17 @@ deliberate commit of its own.
       Done in fd72dd5; sc-build passed there (release build, 25 tests,
       cargo doc -D warnings). #9 P2, #10 P3. Open now: #6, #7 (P2), #9 (P2),
       #10 (P3).
+- [ ] Docs refresh, second pass (2026-09-27, afternoon). No stormlb code
+      changed since fd72dd5; config keys, defaults and ports re-checked and
+      unchanged. What moved is stormcentral: its test runner shipped
+      (stormcentral 02098e0/321bade/20a570b, `stormcentral test run`). It
+      builds `-f test/Containerfile` from the repo root with no build-args,
+      runs its own Job (`/test <suite>`, STORM_* env, SA `storm-test` with a
+      namespaced Role only), and never reads `test/stormlb-test.yaml`: no
+      hostNetwork, no nodes ClusterRole (stormcentral#55).
+  - [ ] File stormcentral issue: a suite cannot ask for hostNetwork.
+  - [ ] File stormlb issue: test/ vs the runner as shipped; propose it
+        --after the stormcentral issues.
+  - [ ] README "Tests on a node", deck, test/Containerfile and
+        test/stormlb-test.yaml headers, test/src/env.rs reach_ip doc; CHANGELOG.
+  - [ ] sc-build (root + test crate + cargo doc -D warnings), golden.
