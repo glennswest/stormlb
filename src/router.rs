@@ -51,10 +51,12 @@ pub struct RouterCfg {
     /// Seconds between route-table refreshes.
     #[serde(default = "default_poll")]
     pub poll_secs: u64,
-    /// Accept the apiserver's certificate without a trusted CA. On today.
-    /// stormcert's CA is not in any trust store yet, and a router that
-    /// refuses the apiserver serves nothing at all; flip this off the day
-    /// the CA is distributed.
+    /// Accept the apiserver's certificate without verifying it. On by
+    /// default, and it has to be: the client trusts only the public web PKI
+    /// roots compiled into it (webpki-roots), never a trust store on the node,
+    /// and there is no key naming a CA file. With this off, stormcert's
+    /// apiserver certificate is refused and the router serves nothing
+    /// (stormlb#10).
     #[serde(default = "default_insecure")]
     pub insecure: bool,
 }

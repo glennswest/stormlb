@@ -81,4 +81,10 @@ Choices that follow from the code (`src/router.rs`):
 
 Deliberately not done (yet): wildcard hostnames, path and header matching,
 more than the first rule and backendRef, TLS termination, a 502 for a dead
-backend, and authenticating to the apiserver.
+backend, and authenticating to the apiserver. The last two are more than
+omissions. The router reads anonymously, which works only against the sno
+apiserver's `--dev-anonymous-admin`
+([#9](https://github.com/glennswest/stormlb/issues/9)). It also can't verify
+the apiserver's certificate, because it trusts only compiled-in public roots
+and has no CA-file key
+([#10](https://github.com/glennswest/stormlb/issues/10)).

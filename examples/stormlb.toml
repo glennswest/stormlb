@@ -50,4 +50,4 @@ router_id = "192.168.8.51"
 # listen = "auto:80"                     # node address + 127.0.0.1; default "0.0.0.0:80"
 # apiserver = "https://127.0.0.1:6443"
 # poll_secs = 5
-# insecure = true                        # stormcert's CA is not in a trust store yet
+# insecure = true                        # leave on: no CA-file key, webpki roots only (stormlb#10)

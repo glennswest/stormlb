@@ -67,7 +67,7 @@ TOML. Unknown keys are ignored. A fuller example is in
 | `listen` | `"0.0.0.0:80"` | Address to listen on. `"auto:<port>"` binds this node's routable IPv4 and `127.0.0.1` on `<port>`; see below. |
 | `apiserver` | `"https://127.0.0.1:6443"` | Where HTTPRoutes and Services are read from. |
 | `poll_secs` | `5` (min 1) | Seconds between route-table refreshes. |
-| `insecure` | `true` | Accept the apiserver's certificate without a trusted CA. stormcert's CA is not in a trust store yet. |
+| `insecure` | `true` | Accept the apiserver's certificate without verifying it. Leave it on: the client trusts only the public roots compiled into it, never the node's trust store, and there is no key for a CA file, so `false` refuses stormcert's certificate ([#10](https://github.com/glennswest/stormlb/issues/10)). |
 
 `auto:<port>` picks the node's address by asking the routing table (a
 connected UDP socket to `203.0.113.1`, so nothing is sent). It binds that
@@ -139,8 +139,14 @@ If the preflight fails (bad ASN, no peers, `router_id` not IPv4), it logs
   **per connection**: a keep-alive connection that later names another host
   stays on the first backend.
 - **The route table** is `GET {apiserver}/apis/gateway.networking.k8s.io/v1/httproutes`
-  (all namespaces, no credentials sent), polled every `poll_secs` with a 10 s
-  timeout. On error it keeps the last good table. Every `spec.hostnames`
+  (all namespaces), polled every `poll_secs` with a 10 s timeout. On error it
+  keeps the last good table. **No credentials are sent**, so it works only
+  where anonymous may list HTTPRoutes and get Services. Today that is the
+  stormcos `sno` apiserver, which runs `--dev-anonymous-admin` (anonymous is
+  cluster-admin, test images only). Against any other rustkube apiserver,
+  anonymous gets discovery only: every refresh is refused, the table stays
+  empty and every host is a 404
+  ([#9](https://github.com/glennswest/stormlb/issues/9)). Every `spec.hostnames`
   entry maps to one backend:
   1. the `storm.io/backend` annotation, `host:port` verbatim. This is how a
      node service routes: `127.0.0.1:9094` is "this node's console" on every
@@ -311,6 +317,12 @@ musl) and run as a Job by [`test/stormlb-test.yaml`](test/stormlb-test.yaml).
 
 What the code does not do yet, which older docs implied it did:
 
+- [#9](https://github.com/glennswest/stormlb/issues/9): the router reads
+  HTTPRoutes and Services with no credentials. It works only against the sno
+  apiserver, where anonymous is cluster-admin (`--dev-anonymous-admin`).
+- [#10](https://github.com/glennswest/stormlb/issues/10): `insecure = false`
+  can't work. The client trusts only compiled-in public roots, and there is
+  no CA-file key.
 - [#6](https://github.com/glennswest/stormlb/issues/6): BGP reconciles
   announce/withdraw only on the 60 s keepalive tick. It doesn't wait for
   Established or enforce a hold timer.

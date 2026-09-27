@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### 2026-09-27
+- **docs:** refreshed from the code for everything since 2026-09-18 (the
+  router's `auto`/loopback listen, `Cargo.lock`, the test container, the CRLF
+  `/healthz`). The facts taken from other components were re-checked at
+  their current HEADs: stormcentral's component entry and relationships,
+  stormcos's boot.d stanza, sno-only start line and apiserver flags, stormd's
+  port + 100, and rustkube's anonymous auth. Two things the docs implied that
+  the code does not do are now stated plainly and filed.
+  #9: the router reads HTTPRoutes and Services anonymously, which works only
+  against the sno apiserver's `--dev-anonymous-admin`.
+  #10: `insecure = false` can never work, because reqwest trusts only its
+  compiled-in webpki roots and there is no CA-file key; the old text said the
+  CA was "not in a trust store yet".
+  Updated: README (`[router]` table, route table, gaps), `router.rs` field
+  doc, the example, design.md and the deck.
+
 ### 2026-09-26
 - **fix(router):** `/healthz` now answers with CRLF line endings, like the
   router's 400 and 404 (#5). The response literal spanned source lines and

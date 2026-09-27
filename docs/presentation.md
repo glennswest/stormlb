@@ -83,6 +83,7 @@ Router only if there is no `[vip]`. Otherwise the L4 balancer runs in the foregr
   1. the `storm.io/backend` annotation, `host:port` verbatim (`127.0.0.1:9094` = "this node's console" on every node)
   2. otherwise the first `backendRef`, resolved to the Service's `clusterIP:port`
 - **Survives the apiserver:** a failed poll keeps the last good table.
+- **Reads anonymously:** it works only against the sno apiserver, where anonymous is cluster-admin (#9). It also doesn't verify the apiserver's certificate (#10).
 - **Its own answers:** `400` with no Host, `404 no route for host <h>`, `200 router alive` for `/healthz` on an unclaimed host.
 - **`listen = "auto:80"`** binds the node's routable IPv4 plus loopback, not `0.0.0.0`, because stormimds holds `169.254.169.254:80`.
 
@@ -103,6 +104,7 @@ Unit-tested, and `tests/balancer.rs` drives round-robin and failover through the
 
 | | Status |
 |---|---|
+| Router credentials for the apiserver, and a CA file to verify it | **planned**, #9, #10 |
 | VRRP Backup preempting a lower-priority Master, priority 0, VIP following backend health | **planned**, #7 |
 | BGP reacting faster than the 60 s keepalive tick, waiting for Established, hold timer | **planned**, #6 |
 | Running the test container on test machines | **planned**, stormcentral#41 (the runner) |
@@ -167,6 +169,8 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 
 **Open issues that matter**
 
+- #9: the router reads anonymously, so it works only on sno (`--dev-anonymous-admin`)
+- #10: no CA-file key, so the apiserver's certificate is never verified
 - #7: VRRP preemption and health-driven ownership, before the VIP half can ship to multi-master
 - #6: BGP reacts only on the 60 s tick
 
