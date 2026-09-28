@@ -110,3 +110,14 @@ deliberate commit of its own.
     Golden NOT built yet: three `stormcentral component build stormlb`
     requests at b9da689 were each interrupted by a stormcentral restart
     (builds 6c320b5e1a19, 39c66777f85d and the first). Request it again.
+- [ ] Docs refresh, third pass (2026-09-27, evening). No code change since
+      fd72dd5. What moved: #12 (no /metrics), #13 (upstream always plaintext),
+      #14 (plaintext :80 only) were filed and the docs don't mention them;
+      stormcos#90 added PROFILE=bastion, which also writes `start stormlb`
+      and runs the apiserver with --dev-anonymous-admin; stormcos#81
+      SECURITY.md lists :80 (stormlb#14) and stormd's :180 (stormd#32) as
+      plaintext, unauthenticated listeners.
+  - [ ] README (router, ports, metrics, how it ships, gaps), design.md,
+        presentation.md, CHANGELOG.
+  - [ ] sc-build (cargo doc -D warnings), then request the golden (also
+        still owed from the second pass).
