@@ -121,4 +121,14 @@ deliberate commit of its own.
         presentation.md, test/src/lib.rs not-started text, CHANGELOG. No new
         issues: every gap found already has one (#12, #13, #14 by the owner).
   - [ ] sc-build (cargo doc -D warnings), then request the golden (also
-        still owed from the second pass).
+        still owed from the second pass). The first sc-build at 869457a
+        never got a slot before the session ended; folded into the fourth pass.
+- [ ] Docs refresh, fourth pass (2026-09-28). Still no code change since
+      fd72dd5. What moved: stormcos#64 (198d8a2) — every node's ironprom
+      scrapes stormd `127.0.0.1:180` for stormlb (state/restarts only; RSS,
+      CPU, fds are stormd#33, filed from #8), and stormcos docs/METRICS.md
+      lists the router's own metrics as missing on `:80` until #12 names a
+      port. stormd#33 is not cited in the docs yet.
+  - [ ] README metrics + tests "not observable", design.md, deck; CHANGELOG.
+  - [ ] sc-build (release build, tests, cargo doc -D warnings, test crate),
+        then request the golden once.
