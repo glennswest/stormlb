@@ -142,8 +142,9 @@ If the preflight fails (bad ASN, no peers, `router_id` not IPv4), it logs
   (all namespaces), polled every `poll_secs` with a 10 s timeout. On error it
   keeps the last good table. **No credentials are sent**, so it works only
   where anonymous may list HTTPRoutes and get Services. Today that is the
-  stormcos `sno` apiserver, which runs `--dev-anonymous-admin` (anonymous is
-  cluster-admin, test images only). Against any other rustkube apiserver,
+  stormcos `sno` and `bastion` apiservers, which run `--dev-anonymous-admin`
+  (anonymous is cluster-admin; stormcos#76 step 2 turns it off once
+  stormlb has an identity). Against any other rustkube apiserver,
   anonymous gets discovery only: every refresh is refused, the table stays
   empty and every host is a 404
   ([#9](https://github.com/glennswest/stormlb/issues/9)). Every `spec.hostnames`
@@ -164,6 +165,14 @@ If the preflight fails (bad ASN, no peers, `router_id` not IPv4), it logs
     A host a route does claim gets its `/healthz` proxied to the backend.
   - If a backend can't be dialled, the connection closes with no response
     (logged at `debug`). There is no 502.
+- **Plaintext on both sides.** It listens only for plain HTTP; there is no
+  TLS listener and no certificate key
+  ([#14](https://github.com/glennswest/stormlb/issues/14)). The connection
+  to the backend is a bare TCP dial, so a backend that serves only HTTPS
+  (the apiserver, cadvisor under stormcos#81) can't sit behind a route: it
+  receives plaintext and the client sees the connection close
+  ([#13](https://github.com/glennswest/stormlb/issues/13)). A client's
+  `Authorization` header is passed through untouched.
 
 ### L4 balancer
 
@@ -205,18 +214,27 @@ Announce/withdraw latency is up to 60 s today
 
 | Port | Proto | Who | When |
 |---|---|---|---|
-| `[router] listen`: **80** in the golden | TCP, HTTP/1.x | clients via `*.storm1.<zone>`; stormd's liveness probe on `127.0.0.1:80/healthz` | `[router]` present |
+| `[router] listen`: **80** in the golden | TCP, plain HTTP/1.x, no auth | clients via `*.storm1.<zone>`; stormd's liveness probe on `127.0.0.1:80/healthz` | `[router]` present |
 | `[vip] port`, e.g. 6443 | TCP | kube-api clients via the VIP | `[vip]` present |
 | n/a | IP proto 112 to `224.0.0.18` | VRRP peers | `[vrrp] enabled` |
 | 179 (outbound only) | TCP | BGP peers | `[bgp] enabled` |
-| 180 in the golden | HTTP | **stormd's** API, not stormlb's (port + 100, stormcentral's convention) | golden |
+| 180 in the golden | plain HTTP, no auth | **stormd's** API, not stormlb's (port + 100, stormcentral's convention). Its TLS and auth are stormd#32. | golden |
+
+stormcos#81 requires every listener on a node to be TLS with a stormcert
+certificate and to authenticate, health probes excepted. stormcos
+`docs/SECURITY.md` lists `:80` as failing that rule until
+[#14](https://github.com/glennswest/stormlb/issues/14) lands.
 
 **Health:** the router's `/healthz` (above) is the only endpoint. The L4
 half has no health endpoint of its own; a node's VIP state is visible in
 the logs and with `ip addr`.
 
-**Metrics:** none. stormlb exports no metrics endpoint. stormd's API
-reports the process's restarts and liveness failures.
+**Metrics:** none. stormlb exports no metrics endpoint: `GET /metrics` on
+`:80` is the 404 for an unclaimed host, or goes to the backend of a
+claimed one.
+stormd's API reports the process's restarts and liveness failures. Prometheus
+metrics (requests by host and code, latency, upstream errors, connections)
+are [#12](https://github.com/glennswest/stormlb/issues/12), for stormcos#64.
 
 ## How it ships
 
@@ -244,9 +262,9 @@ stormcentral):
   `deploy/build-goldens.sh` writes a `spec stormlb` stanza into
   `/etc/stormpump/boot.d/40-services`. It is a container on the host network
   profile, sharing UTS, with its data and log volumes. On the `sno`
-  profile (the default) it also writes `start stormlb`. A node runs the
-  router because it has that `start` line; the `node` and `storage`
-  profiles get the spec without it.
+  and `bastion` profiles it also writes `start stormlb` (`sno` is the
+  default). A node runs the router because it has that `start` line; the
+  `node` and `storage` profiles get the spec without it.
   stormcos `deploy/image.toml` places the three goldens.
 
 ## Build and test
@@ -312,8 +330,8 @@ runner can't grant yet ([#11](https://github.com/glennswest/stormlb/issues/11)):
   `STORMLB_STORMD` (`none` for no stormd) override them. `STORMLB_ROUTE_WAIT`
   (default 30 s) is how long a route change may take, and `STORMLB_SETTLE`
   (12 s) is how long to wait before calling something *not* routed.
-- **Where stormlb isn't started:** stormcos starts it on the `sno` profile
-  only. When neither the router nor its stormd answers, a suite reports one
+- **Where stormlb isn't started:** stormcos starts it on the `sno` and
+  `bastion` profiles only. When neither the router nor its stormd answers, a suite reports one
   `stormlb-started` skip, never a pass. If stormd answers and the router
   doesn't, that's a failure.
 - **Not observable yet:** the router's own memory and file descriptors.
@@ -334,7 +352,8 @@ What the code does not do yet, which older docs implied it did:
 
 - [#9](https://github.com/glennswest/stormlb/issues/9): the router reads
   HTTPRoutes and Services with no credentials. It works only against the sno
-  apiserver, where anonymous is cluster-admin (`--dev-anonymous-admin`).
+  and bastion apiservers, where anonymous is cluster-admin
+  (`--dev-anonymous-admin`).
 - [#10](https://github.com/glennswest/stormlb/issues/10): `insecure = false`
   can't work. The client trusts only compiled-in public roots, and there is
   no CA-file key.
@@ -344,6 +363,12 @@ What the code does not do yet, which older docs implied it did:
 - [#7](https://github.com/glennswest/stormlb/issues/7): a VRRP Backup never
   preempts a lower-priority Master, and priority 0 isn't handled. VIP
   ownership ignores backend health. It relies on `ip` and `arping` binaries.
+- [#12](https://github.com/glennswest/stormlb/issues/12): no metrics
+  endpoint (stormcos#64).
+- [#13](https://github.com/glennswest/stormlb/issues/13): the upstream
+  connection is always plaintext, so an HTTPS-only backend can't be routed.
+- [#14](https://github.com/glennswest/stormlb/issues/14): the router listens
+  only on plain `:80`; no TLS termination (stormcos#81).
 - [#11](https://github.com/glennswest/stormlb/issues/11): the test
   container doesn't match stormcentral's shipped runner: no `hostNetwork`,
   no `nodes` read, and the Job template is unused. It hasn't run on a test

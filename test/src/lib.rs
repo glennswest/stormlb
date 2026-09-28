@@ -51,7 +51,7 @@ pub async fn run(env: &Env, r: &mut Report) {
 
 /// Whether stormlb is simply not started on this node: neither the router
 /// nor the stormd of its container answers. stormcos writes `start stormlb`
-/// for the `sno` profile only, so on a `node` or `storage` machine that is
+/// for the `sno` and `bastion` profiles only, so on a `node` or `storage` machine that is
 /// the configuration, not a fault: every suite reports one skip. A stormd
 /// that answers with the router down is a fault, and the suite says so.
 async fn not_started(env: &Env) -> Option<String> {
@@ -64,7 +64,7 @@ async fn not_started(env: &Env) -> Option<String> {
     }
     Some(format!(
         "neither the router ({}) nor its stormd ({sd}) answers: stormlb is not started on this node \
-         (stormcos starts it on the sno profile)",
+         (stormcos starts it on the sno and bastion profiles)",
         env.router
     ))
 }

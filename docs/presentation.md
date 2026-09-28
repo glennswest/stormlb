@@ -83,7 +83,7 @@ Router only if there is no `[vip]`. Otherwise the L4 balancer runs in the foregr
   1. the `storm.io/backend` annotation, `host:port` verbatim (`127.0.0.1:9094` = "this node's console" on every node)
   2. otherwise the first `backendRef`, resolved to the Service's `clusterIP:port`
 - **Survives the apiserver:** a failed poll keeps the last good table.
-- **Reads anonymously:** it works only against the sno apiserver, where anonymous is cluster-admin (#9). It also doesn't verify the apiserver's certificate (#10).
+- **Reads anonymously:** it works only against the sno and bastion apiservers, where anonymous is cluster-admin (#9). It also doesn't verify the apiserver's certificate (#10).
 - **Its own answers:** `400` with no Host, `404 no route for host <h>`, `200 router alive` for `/healthz` on an unclaimed host.
 - **`listen = "auto:80"`** binds the node's routable IPv4 plus loopback, not `0.0.0.0`, because stormimds holds `169.254.169.254:80`.
 
@@ -105,11 +105,13 @@ Unit-tested, and `tests/balancer.rs` drives round-robin and failover through the
 | | Status |
 |---|---|
 | Router credentials for the apiserver, and a CA file to verify it | **planned**, #9, #10 |
+| TLS on `:443` with the stormcert wildcard, and TLS to HTTPS-only backends (stormcos#81) | **planned**, #14, #13 |
+| Prometheus `/metrics` (stormcos#64) | **planned**, #12 |
 | VRRP Backup preempting a lower-priority Master, priority 0, VIP following backend health | **planned**, #7 |
 | BGP reacting faster than the 60 s keepalive tick, waiting for Established, hold timer | **planned**, #6 |
 | Running the test container on test machines | runner shipped (`stormcentral test run`); stormlb's suites need `hostNetwork` and a `nodes` read it can't grant yet: **planned**, #11 (stormcentral#74, #55) |
 | 4-octet ASNs, MP-BGP, IPv6, netlink instead of `ip`/`arping` | follow-ups |
-| Wildcard hosts, path/header matches, TLS termination, 502 on a dead backend, apiserver auth | not done (router) |
+| Wildcard hosts, path/header matches, 502 on a dead backend | not done (router) |
 | Sub-second VRRP failover (config takes whole seconds) | not possible today |
 
 ---
@@ -140,14 +142,14 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 
 | Port | What |
 |---|---|
-| **80** (router `listen`) | HTTP/1.x from clients via `*.storm1.<zone>`; stormd's probe on `127.0.0.1:80/healthz` |
+| **80** (router `listen`) | plain HTTP/1.x, no auth (#14), from clients via `*.storm1.<zone>`; stormd's probe on `127.0.0.1:80/healthz` |
 | `[vip] port`, e.g. 6443 | kube-api clients via the VIP |
 | IP proto 112 → `224.0.0.18` | VRRP peers |
 | 179, outbound only | BGP peers |
-| 180 | **stormd's** API in the golden, not stormlb's |
+| 180 | **stormd's** API in the golden, not stormlb's; plain, no auth (stormd#32) |
 
 - **Health:** the router's `/healthz` is the only endpoint. The VIP half has none; its state shows in the logs and in `ip addr`.
-- **Metrics:** none. stormd's API reports restarts and liveness failures.
+- **Metrics:** none (#12). stormd's API reports restarts and liveness failures.
 
 ---
 
@@ -155,7 +157,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 
 - **Golden kind:** stormcentral `service`, a 32 MiB `stormlb` golden on pallet `system1`. It holds the static musl `/usr/sbin/stormlb` in a stormd base, plus `stormlb-data` (`/var/lib/stormlb`) and `stormlb-logs` (`/var/log/stormd`).
 - **Baked config:** router only, `[router] listen = "auto:80"`.
-- **How it starts:** no systemd; stormpump is PID 1. stormcos `build-goldens.sh` writes a `spec stormlb` stanza into `boot.d/40-services`: a container on the host network profile, sharing UTS. On the **sno** profile it also writes `start stormlb`. stormd then runs it with `--config /etc/stormlb/stormlb.toml`, restarts it on exit and probes `/healthz`.
+- **How it starts:** no systemd; stormpump is PID 1. stormcos `build-goldens.sh` writes a `spec stormlb` stanza into `boot.d/40-services`: a container on the host network profile, sharing UTS. On the **sno** and **bastion** profiles it also writes `start stormlb`. stormd then runs it with `--config /etc/stormlb/stormlb.toml`, restarts it on exit and probes `/healthz`.
 - **How it is updated:** push → `sc-build` on dev.g8.lo → `stormcentral component build stormlb`. That builds an immutable golden from the exact commit (`--release --locked`, musl) and files a stormcos release request. A stormcos release then carries the new golden to nodes.
 
 ---
@@ -163,17 +165,19 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 ## Status
 
 - **Version** 0.1.0 (pre-1.0; `Cargo.toml` is the only version location).
-- **Shipping:** the router, in every stormcos build that includes stormlb, and started on sno nodes.
+- **Shipping:** the router, in every stormcos build that includes stormlb, and started on sno and bastion nodes.
 - **Not shipping:** the VIP half. On a single node the VIP is the node's own address, so nothing needs to float yet.
 - **Tests:** 25 unit and integration tests (`cargo test --locked` through `sc-build`), plus the `test/` container: short, medium and long suites against the router on a node, proven by a hermetic harness. stormcentral's runner exists now, but stormlb's suites are not yet run on a test machine (#11).
 
 **Open issues that matter**
 
-- #9: the router reads anonymously, so it works only on sno (`--dev-anonymous-admin`)
+- #14, #13: plaintext on both sides — no TLS listener, no TLS to backends (stormcos#81)
+- #9: the router reads anonymously, so it works only on sno and bastion (`--dev-anonymous-admin`)
 - #10: no CA-file key, so the apiserver's certificate is never verified
 - #7: VRRP preemption and health-driven ownership, before the VIP half can ship to multi-master
 - #6: BGP reacts only on the 60 s tick
 - #11: the test container vs stormcentral's runner (no `hostNetwork`, no `nodes` read yet)
+- #12: no metrics endpoint
 
 ---
 

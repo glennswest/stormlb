@@ -117,7 +117,8 @@ deliberate commit of its own.
       and runs the apiserver with --dev-anonymous-admin; stormcos#81
       SECURITY.md lists :80 (stormlb#14) and stormd's :180 (stormd#32) as
       plaintext, unauthenticated listeners.
-  - [ ] README (router, ports, metrics, how it ships, gaps), design.md,
-        presentation.md, CHANGELOG.
+  - [x] README (router, ports, metrics, how it ships, gaps), design.md,
+        presentation.md, test/src/lib.rs not-started text, CHANGELOG. No new
+        issues: every gap found already has one (#12, #13, #14 by the owner).
   - [ ] sc-build (cargo doc -D warnings), then request the golden (also
         still owed from the second pass).

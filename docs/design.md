@@ -80,10 +80,18 @@ Choices that follow from the code (`src/router.rs`):
   the wildcard, because stormimds holds `169.254.169.254:80`.
 
 Deliberately not done (yet): wildcard hostnames, path and header matching,
-more than the first rule and backendRef, TLS termination, a 502 for a dead
-backend, and authenticating to the apiserver. The last two are more than
-omissions. The router reads anonymously, which works only against the sno
-apiserver's `--dev-anonymous-admin`
+more than the first rule and backendRef, a 502 for a dead backend, and
+metrics ([#12](https://github.com/glennswest/stormlb/issues/12)).
+
+TLS is now a requirement, not an option: stormcos#81 has every node listener
+serve TLS with a stormcert certificate and authenticate. The router is
+plaintext on both sides. It listens only on plain `:80`
+([#14](https://github.com/glennswest/stormlb/issues/14)), and it dials
+every backend over bare TCP, so an HTTPS-only backend can't be routed
+([#13](https://github.com/glennswest/stormlb/issues/13)).
+
+Its apiserver client is the other gap. The router reads anonymously, which
+works only against the sno and bastion apiservers' `--dev-anonymous-admin`
 ([#9](https://github.com/glennswest/stormlb/issues/9)). It also can't verify
 the apiserver's certificate, because it trusts only compiled-in public roots
 and has no CA-file key

@@ -3,6 +3,17 @@
 ## [Unreleased]
 
 ### 2026-09-27
+- **docs:** third refresh. Still no stormlb code change since fd72dd5; keys,
+  defaults and ports unchanged. The docs now carry what was filed or moved
+  since: #12 (no `/metrics`, for stormcos#64), #13 (the upstream dial is
+  bare TCP, so an HTTPS-only backend can't be routed) and #14 (plain `:80`
+  only, no TLS termination; stormcos#81 requires TLS on every node
+  listener). Ports table marks `:80` and stormd's `:180` (stormd#32) as
+  plaintext without auth. stormcos#90's `bastion` profile also writes
+  `start stormlb` and runs the apiserver with `--dev-anonymous-admin`, so
+  README, design.md, the deck and the test crate's not-started message say
+  "sno and bastion" where they said sno. Updated README, docs/design.md,
+  docs/presentation.md, test/src/lib.rs.
 - **docs:** second refresh. No stormlb code changed since the first. Config
   keys, defaults and ports were re-checked against `config.rs`, `router.rs`
   and `main.rs` and still match. What moved is stormcentral: its test runner
