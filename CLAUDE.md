@@ -110,7 +110,7 @@ deliberate commit of its own.
     Golden NOT built yet: three `stormcentral component build stormlb`
     requests at b9da689 were each interrupted by a stormcentral restart
     (builds 6c320b5e1a19, 39c66777f85d and the first). Request it again.
-- [ ] Docs refresh, third pass (2026-09-27, evening). No code change since
+- [x] Docs refresh, third pass (2026-09-27, evening). No code change since
       fd72dd5. What moved: #12 (no /metrics), #13 (upstream always plaintext),
       #14 (plaintext :80 only) were filed and the docs don't mention them;
       stormcos#90 added PROFILE=bastion, which also writes `start stormlb`
@@ -120,15 +120,19 @@ deliberate commit of its own.
   - [x] README (router, ports, metrics, how it ships, gaps), design.md,
         presentation.md, test/src/lib.rs not-started text, CHANGELOG. No new
         issues: every gap found already has one (#12, #13, #14 by the owner).
-  - [ ] sc-build (cargo doc -D warnings), then request the golden (also
+  - [x] sc-build (cargo doc -D warnings), then request the golden (also
         still owed from the second pass). The first sc-build at 869457a
         never got a slot before the session ended; folded into the fourth pass.
-- [ ] Docs refresh, fourth pass (2026-09-28). Still no code change since
+- [x] Docs refresh, fourth pass (2026-09-28). Still no code change since
       fd72dd5. What moved: stormcos#64 (198d8a2) — every node's ironprom
       scrapes stormd `127.0.0.1:180` for stormlb (state/restarts only; RSS,
       CPU, fds are stormd#33, filed from #8), and stormcos docs/METRICS.md
       lists the router's own metrics as missing on `:80` until #12 names a
       port. stormd#33 is not cited in the docs yet.
-  - [ ] README metrics + tests "not observable", design.md, deck; CHANGELOG.
-  - [ ] sc-build (release build, tests, cargo doc -D warnings, test crate),
-        then request the golden once.
+  - [x] README metrics + tests "not observable", design.md, deck; CHANGELOG.
+        Done in a039a06; no new gaps, so no new issues.
+  - [x] sc-build passed at a039a06: release build, 25 tests, cargo doc
+        -D warnings, test crate 11 unit + 3 harness. Golden requested there
+        (covers the second and third passes too). Open now: #6, #7 (P3 after
+        the 2026-09-28 validation: VIP half not in the shipped golden), #9,
+        #11, #12, #13, #14 (P2), #10 (P3).
