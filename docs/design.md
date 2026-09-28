@@ -81,7 +81,8 @@ Choices that follow from the code (`src/router.rs`):
 
 Deliberately not done (yet): wildcard hostnames, path and header matching,
 more than the first rule and backendRef, a 502 for a dead backend, and
-metrics ([#12](https://github.com/glennswest/stormlb/issues/12)).
+metrics ([#12](https://github.com/glennswest/stormlb/issues/12)); a node's
+ironprom scrapes only stormd's `:180` for stormlb (stormcos#64).
 
 TLS is now a requirement, not an option: stormcos#81 has every node listener
 serve TLS with a stormcert certificate and authenticate. The router is

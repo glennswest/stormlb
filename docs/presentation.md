@@ -149,7 +149,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 | 180 | **stormd's** API in the golden, not stormlb's; plain, no auth (stormd#32) |
 
 - **Health:** the router's `/healthz` is the only endpoint. The VIP half has none; its state shows in the logs and in `ip addr`.
-- **Metrics:** none (#12). stormd's API reports restarts and liveness failures.
+- **Metrics:** none (#12). The node's ironprom scrapes stormd's `:180`: state and restarts, not the router's memory or fds (stormd#33).
 
 ---
 

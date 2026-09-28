@@ -236,6 +236,13 @@ stormd's API reports the process's restarts and liveness failures. Prometheus
 metrics (requests by host and code, latency, upstream errors, connections)
 are [#12](https://github.com/glennswest/stormlb/issues/12), for stormcos#64.
 
+What a node collects today (stormcos#64): its ironprom scrapes stormd's
+`/metrics` on `127.0.0.1:180`, so stormlb's process state, restarts and
+crashes are recorded. The router's memory, CPU and open file descriptors are
+not: stormd's `process_*` series describe stormd itself (stormd#33).
+stormcos `docs/METRICS.md` lists the router's own metrics as missing (a 404
+on `:80`), and its scrape config adds a stormlb target once #12 names a port.
+
 ## How it ships
 
 stormlb is a stormcentral component (`components/stormcos.toml` in
@@ -335,7 +342,8 @@ runner can't grant yet ([#11](https://github.com/glennswest/stormlb/issues/11)):
   `stormlb-started` skip, never a pass. If stormd answers and the router
   doesn't, that's a failure.
 - **Not observable yet:** the router's own memory and file descriptors.
-  stormd's open `/metrics` reports stormd's, not the process it supervises.
+  stormd's open `/metrics` reports stormd's, not the process it supervises
+  (stormd#33).
 - **The harness:** `test/tests/harness.rs` runs the three suites against the
   real router (`stormlb::router::run`) and a small in-memory apiserver, all
   on loopback. That's how the container's own code is tested:

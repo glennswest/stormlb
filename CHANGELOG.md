@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### 2026-09-28
+- **docs:** fourth refresh. Still no stormlb code change since fd72dd5; keys,
+  defaults, ports and shipping re-checked and unchanged. What moved is
+  stormcos#64: every node's ironprom now scrapes stormd's `127.0.0.1:180`
+  for stormlb, which records process state and restarts but not the router's
+  memory, CPU or fds (stormd#33), and stormcos `docs/METRICS.md` lists the
+  router's own metrics as missing until #12. README (metrics, tests),
+  docs/design.md and docs/presentation.md say so. No new gaps found, so no
+  new issues.
+
 ### 2026-09-27
 - **docs:** third refresh. Still no stormlb code change since fd72dd5; keys,
   defaults and ports unchanged. The docs now carry what was filed or moved
