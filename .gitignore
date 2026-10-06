@@ -1,2 +1,6 @@
 /target
 /test/target
+/test/out
+
+# Scratch files (CLAUDE.md)
+tmp/

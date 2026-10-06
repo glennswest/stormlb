@@ -1,0 +1,26 @@
+# What stormlb's suites need on a test machine, read by stormcentral's runner
+# at the commit it tests (stormcentral docs/test-standard.md, README
+# "Component tests"; #74 host access, #55 cluster reads). The runner's own
+# Role already covers the run's namespace: the suites create only HTTPRoutes,
+# Services and Endpoints there, labelled storm.io/test-run.
+#
+# Every suite runs on the host network: its backends listen in the test pod,
+# and the router (under stormd, on the host network) dials them at the
+# node's address, the same way it dials a node service. Without it the
+# backends are pod IPs, which the host may not route to.
+#
+# No hardware is required. On a node that does not start stormlb (stormcos
+# profiles other than sno and bastion) every suite reports one
+# `stormlb-started` skip, never a pass. Targets: the router at
+# STORM_NODE:80, stormd at STORM_NODE:180. Nothing is fetched from outside.
+
+[short]
+host_network = true
+
+[medium]
+host_network = true
+
+# The long suite sizes its waves from the node's allocatable CPU.
+[long]
+host_network = true
+cluster_read = [{ apiGroup = "", resource = "nodes" }]
