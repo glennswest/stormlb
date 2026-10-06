@@ -136,3 +136,20 @@ deliberate commit of its own.
         (covers the second and third passes too). Open now: #6, #7 (P3 after
         the 2026-09-28 validation: VIP half not in the shipped golden), #9,
         #11, #12, #13, #14 (P2), #10 (P3).
+- [ ] #11 (+ #17) test/ against stormcentral's runner as shipped (2026-10-06).
+      stormcentral#74 (host access) and #55 (cluster reads) are closed:
+      a suite declares both in `test/requires.toml`. #121 (podman out) is
+      still open, so the runner still builds `test/Containerfile` after an
+      optional `test/build.sh`.
+  - [ ] `test/requires.toml`: `host_network = true` on short/medium/long,
+        `cluster_read = [nodes]` on long (the only suite that reads nodes).
+  - [ ] `test/build.sh` (static musl, into `test/out/test`, as
+        stormcos-cilium's); Containerfile just COPYs it (no rust stage).
+        `.gitignore`: `test/out/`, `tmp/`.
+  - [ ] Drop `test/stormlb-test.yaml`: requires.toml now carries what it
+        recorded, and the runner never read it.
+  - [ ] README "Tests on a node", gaps, deck, test/src/{env,lib}.rs docs,
+        CHANGELOG.
+  - [ ] sc-build: root, test crate, test/build.sh + podman build.
+  - [ ] `stormcentral test run stormlb short` / `medium` on a test machine
+        (long is night-only, pve VM). Close #11 and #17, golden.
