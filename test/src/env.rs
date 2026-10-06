@@ -112,10 +112,9 @@ impl Env {
 
     /// The address the router reaches this container on: the source address
     /// the kernel picks toward the router. A connected UDP socket sends
-    /// nothing; `connect` only asks the routing table. With `hostNetwork`
-    /// (test/stormlb-test.yaml) this is the address of the node the Job runs
-    /// on. In stormcentral's runner, which can't grant it yet (#11), it is
-    /// the pod's address.
+    /// nothing; `connect` only asks the routing table. Every suite runs with
+    /// `host_network` (test/requires.toml), so this is the address of the
+    /// node the Job runs on. Run without it, it is the pod's address.
     pub fn reach_ip(&self) -> Result<IpAddr, String> {
         let to: SocketAddr = self
             .router

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### 2026-10-06
+- **test:** the test container now matches stormcentral's runner as shipped
+  (#11, #17). `test/requires.toml` declares `host_network = true` for
+  short, medium and long (the router dials the suites' backends at the
+  node's address) and a `nodes` read for long (its waves are sized from
+  allocatable CPU); stormcentral#74 and #55 made both declarable.
+  `test/build.sh` builds the static musl binary into `test/out/test` on the
+  build box, and `test/Containerfile` only copies it in (no `rust:1-alpine`
+  stage). `test/stormlb-test.yaml` is gone: the runner never read it, and
+  requires.toml now records what it did. `.gitignore` gains `test/out/` and
+  `tmp/`.
+- **docs:** README "Tests on a node", the deck and `test/` module docs
+  describe requires.toml and build.sh; #11 leaves the gaps list.
+
 ### 2026-09-28
 - **docs:** fourth refresh. Still no stormlb code change since fd72dd5; keys,
   defaults, ports and shipping re-checked and unchanged. What moved is

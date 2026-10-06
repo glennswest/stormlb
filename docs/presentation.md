@@ -109,7 +109,7 @@ Unit-tested, and `tests/balancer.rs` drives round-robin and failover through the
 | Prometheus `/metrics` (stormcos#64) | **planned**, #12 |
 | VRRP Backup preempting a lower-priority Master, priority 0, VIP following backend health | **planned**, #7 |
 | BGP reacting faster than the 60 s keepalive tick, waiting for Established, hold timer | **planned**, #6 |
-| Running the test container on test machines | runner shipped (`stormcentral test run`); stormlb's suites need `hostNetwork` and a `nodes` read it can't grant yet: **planned**, #11 (stormcentral#74, #55) |
+| Running the test container on test machines | runner shipped (`stormcentral test run`); `test/requires.toml` declares `host_network` (all suites) and the `nodes` read (`long`), `test/build.sh` builds the binary: **ready, not yet run on a test machine** |
 | 4-octet ASNs, MP-BGP, IPv6, netlink instead of `ip`/`arping` | follow-ups |
 | Wildcard hosts, path/header matches, 502 on a dead backend | not done (router) |
 | Sub-second VRRP failover (config takes whole seconds) | not possible today |
@@ -167,7 +167,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 - **Version** 0.1.0 (pre-1.0; `Cargo.toml` is the only version location).
 - **Shipping:** the router, in every stormcos build that includes stormlb, and started on sno and bastion nodes.
 - **Not shipping:** the VIP half. On a single node the VIP is the node's own address, so nothing needs to float yet.
-- **Tests:** 25 unit and integration tests (`cargo test --locked` through `sc-build`), plus the `test/` container: short, medium and long suites against the router on a node, proven by a hermetic harness. stormcentral's runner exists now, but stormlb's suites are not yet run on a test machine (#11).
+- **Tests:** 25 unit and integration tests (`cargo test --locked` through `sc-build`), plus the `test/` container: short, medium and long suites against the router on a node, proven by a hermetic harness. The suites declare what they need of the node in `test/requires.toml`; they have not yet run on a test machine.
 
 **Open issues that matter**
 
@@ -176,7 +176,6 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 - #10: no CA-file key, so the apiserver's certificate is never verified
 - #7: VRRP preemption and health-driven ownership, before the VIP half can ship to multi-master
 - #6: BGP reacts only on the 60 s tick
-- #11: the test container vs stormcentral's runner (no `hostNetwork`, no `nodes` read yet)
 - #12: no metrics endpoint
 
 ---
