@@ -160,3 +160,9 @@ deliberate commit of its own.
     Golden golden-stormlb-2d93cddd720c at 8aacaf3, stormcos#106.
     Runner run 9c56c07cc4 (short, C2NR0Q2) queued behind master's install
     lease (until 19:04Z); a no-tag run hits stormcentral#334 (nanatest1).
+    9c56c07cc4 ran: all 5 checks passed in the pod (routed via the node
+    address, so hostNetwork works), but rustkube-node#136 cut every line's
+    first three words and the runner recorded error. Fixed in a120b52:
+    spaceless result lines (`\u0020`). sc-build passed (test crate 12 unit +
+    3 harness, doc, build.sh). Rerun 68c92cb201 queued on C2NR0Q2; then
+    golden again and close #11.
