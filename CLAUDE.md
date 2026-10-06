@@ -141,15 +141,22 @@ deliberate commit of its own.
       a suite declares both in `test/requires.toml`. #121 (podman out) is
       still open, so the runner still builds `test/Containerfile` after an
       optional `test/build.sh`.
-  - [ ] `test/requires.toml`: `host_network = true` on short/medium/long,
+  - [x] `test/requires.toml`: `host_network = true` on short/medium/long,
         `cluster_read = [nodes]` on long (the only suite that reads nodes).
-  - [ ] `test/build.sh` (static musl, into `test/out/test`, as
+  - [x] `test/build.sh` (static musl, into `test/out/test`, as
         stormcos-cilium's); Containerfile just COPYs it (no rust stage).
         `.gitignore`: `test/out/`, `tmp/`.
-  - [ ] Drop `test/stormlb-test.yaml`: requires.toml now carries what it
+  - [x] Drop `test/stormlb-test.yaml`: requires.toml now carries what it
         recorded, and the runner never read it.
-  - [ ] README "Tests on a node", gaps, deck, test/src/{env,lib}.rs docs,
+  - [x] README "Tests on a node", gaps, deck, test/src/{env,lib}.rs docs,
         CHANGELOG.
-  - [ ] sc-build: root, test crate, test/build.sh + podman build.
+  - [x] sc-build: root, test crate, test/build.sh + podman build.
   - [ ] `stormcentral test run stormlb short` / `medium` on a test machine
         (long is night-only, pve VM). Close #11 and #17, golden.
+  - Done in 6a13204 + 8aacaf3. sc-build passed at 6a13204: release build,
+    25 tests, test crate 11 unit + 3 harness, `test/build.sh` (5.5 MB
+    static-pie), `podman build` of the scratch image, `/test short` with no
+    env exits 2; `cargo doc -D warnings` (root and test) at 8aacaf3.
+    Golden golden-stormlb-2d93cddd720c at 8aacaf3, stormcos#106.
+    Runner run 9c56c07cc4 (short, C2NR0Q2) queued behind master's install
+    lease (until 19:04Z); a no-tag run hits stormcentral#334 (nanatest1).
