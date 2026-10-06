@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-06
+- **fix(test):** result lines carry no literal space (compact JSON, `\u0020`
+  inside strings). The first runner run (9c56c07cc4, short, C2NR0Q2) passed
+  all five checks, but rustkube-node's pod `/log` cut the first three words
+  off each line (rustkube-node#136), so stormcentral read no results and
+  recorded an error. The text parses back unchanged.
 - **test:** the test container now matches stormcentral's runner as shipped
   (#11, #17). `test/requires.toml` declares `host_network = true` for
   short, medium and long (the router dials the suites' backends at the

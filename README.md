@@ -309,7 +309,10 @@ built in two steps: `test/build.sh` compiles the static (musl) binary into
 `stormcentral test run stormlb <short|medium|long>`: it runs `test/build.sh`
 on the build box, builds the image with the repo root as the context, and
 starts `/test <suite>` with the standard's `STORM_*` environment in its own
-Job. Results are the JSON lines on stdout, read from the pod log.
+Job. Results are the JSON lines on stdout, read from the pod log. Each line
+is compact JSON with every space in a string written `\u0020`, so no line
+has a literal space: rustkube-node's `/log` cuts the first three words off
+any line with three or more (rustkube-node#136).
 
 What the suites need of the node is declared per suite in
 [`test/requires.toml`](test/requires.toml), which the runner reads at the

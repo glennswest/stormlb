@@ -136,8 +136,8 @@ impl Wave {
     fn json(&self) -> String {
         let opt = |v: Option<u64>| v.map(|v| v.to_string()).unwrap_or_else(|| "null".into());
         format!(
-            "\"wave\": {}, \"mix\": {}, \"routes\": {}, \"conns\": {}, \"route_ms\": {}, \"requests\": {}, \"errors\": {}, \
-             \"p50_us\": {}, \"p99_us\": {}, \"rps\": {}, \"drain_ms\": {}, \"leftovers\": {}, \"restarts\": {}, \"idle_p50_us\": {}",
+            "\"wave\":{},\"mix\":{},\"routes\":{},\"conns\":{},\"route_ms\":{},\"requests\":{},\"errors\":{},\
+             \"p50_us\":{},\"p99_us\":{},\"rps\":{},\"drain_ms\":{},\"leftovers\":{},\"restarts\":{},\"idle_p50_us\":{}",
             self.n,
             self.mix,
             self.routes,

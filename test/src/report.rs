@@ -1,6 +1,12 @@
 //! Results as the test standard wants them: one JSON object per test on
 //! stdout, a summary line last, the same lines under `/results`, and an exit
 //! code of 0 (all passed), 1 (a test failed) or 2 (could not run).
+//!
+//! Every line has no literal space: the JSON is compact, and a space inside
+//! a string is written `\u0020`. rustkube-node's pod `/log` drops the first
+//! three words of any plain line with three or more spaces
+//! (rustkube-node#136), which cut every result line on a test machine and
+//! left the runner nothing to read. Any JSON parser reads the same text back.
 
 use std::fs::{File, OpenOptions};
 use std::future::Future;
@@ -71,12 +77,7 @@ impl Report {
                 ("fail", format!("could not run: {d}"))
             }
         };
-        let extra = extra.map(|e| format!(", {e}")).unwrap_or_default();
-        self.line(&format!(
-            "{{\"test\": {}, \"status\": \"{status}\", \"ms\": {ms}, \"detail\": {}{extra}}}",
-            json(name),
-            json(&detail)
-        ));
+        self.line(&result_line(name, status, ms, &detail, extra));
         self.outcomes.push((name.to_string(), status));
         status == "pass"
     }
@@ -93,7 +94,7 @@ impl Report {
     pub fn finish(&mut self) -> i32 {
         let fail = self.fail + self.infra;
         let s = format!(
-            "{{\"summary\": {{\"pass\": {}, \"fail\": {fail}, \"skip\": {}}}}}",
+            "{{\"summary\":{{\"pass\":{},\"fail\":{fail},\"skip\":{}}}}}",
             self.pass, self.skip
         );
         self.line(&s);
@@ -105,7 +106,14 @@ impl Report {
     }
 }
 
-/// A JSON string literal.
+/// One test's line; `extra` is compact JSON members (no spaces), added
+/// verbatim.
+fn result_line(name: &str, status: &str, ms: u128, detail: &str, extra: Option<&str>) -> String {
+    let extra = extra.map(|e| format!(",{e}")).unwrap_or_default();
+    format!("{{\"test\":{},\"status\":\"{status}\",\"ms\":{ms},\"detail\":{}{extra}}}", json(name), json(detail))
+}
+
+/// A JSON string literal, with no literal space in it (see the module doc).
 pub fn json(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -116,6 +124,7 @@ pub fn json(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            ' ' => out.push_str("\\u0020"),
             c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
@@ -131,7 +140,20 @@ mod tests {
     #[test]
     fn json_strings_escape() {
         assert_eq!(json("a\"b\\c\nd\u{1b}"), r#""a\"b\\c\nd\u001b""#);
-        assert_eq!(json("em — dash"), "\"em — dash\"");
+        assert_eq!(json("em — dash"), "\"em\\u0020—\\u0020dash\"");
+    }
+
+    #[test]
+    fn result_lines_have_no_spaces_and_read_back_exactly() {
+        let detail = "short.x.stormlb-test.invalid -> 192.168.30.2:35577 after 3425 ms";
+        let l = result_line("route reaches backend", "pass", 3447, detail, Some("\"wave\":1,\"rps\":9"));
+        assert!(!l.contains(' '), "{l}");
+        let v: serde_json::Value = serde_json::from_str(&l).unwrap();
+        assert_eq!(v["test"], "route reaches backend");
+        assert_eq!(v["status"], "pass");
+        assert_eq!(v["ms"], 3447);
+        assert_eq!(v["detail"], detail);
+        assert_eq!(v["rps"], 9);
     }
 
     #[test]
