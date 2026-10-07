@@ -335,5 +335,8 @@ deliberate commit of its own.
   - Code/test/docs pushed: 6b03e29, c096918 (clippy: unread field, #23),
     64f8975 (docs). At 6b03e29 every test passed (42 unit, bgp 3/3) but
     clippy failed on the test; c096918 fixes it. Its sc-build twice never
-    started: dev.g8.lo refused ssh (12:18Z, 2026-10-07). Waiting for dev,
-    then rerun; then golden, close #6 and #23.
+    started: dev.g8.lo refused ssh (12:18Z, 2026-10-07; dev is retired).
+    Passed on a fresh build VM (SC_BUILD_VM=1) at 19fd477: release build,
+    42 unit + every integration test, bgp 4 runs, clippy/doc, test crate.
+    #23 closed. Golden blocked until stormcentral#521: #6 proposed after it.
+    Then: `stormcentral component build stormlb`, close #6, shipped.
