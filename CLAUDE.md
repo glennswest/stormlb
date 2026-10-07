@@ -206,4 +206,5 @@ deliberate commit of its own.
     -D warnings, test crate 12 + 3. Filed stormcluster#35 (VIP port vs the
     apiserver's 0.0.0.0:6443); #7 raised to P1. stormcentral registry config
     now ships `[api] state_file = "/var/lib/stormlb/vips.json"` beside the
-    router. stormcluster's client is its #10.
+    router. stormcluster's client is its #10. Golden
+    golden-stormlb-12f8f607164a at 4f48304 (stormcos#361); #16 closed, shipped.
