@@ -69,6 +69,9 @@ struct Loaded {
 pub struct Certs {
     pairs: Vec<CertPair>,
     loaded: RwLock<Vec<Option<Loaded>>>,
+    /// Each pair's last load error, so a missing file is logged once, not
+    /// every `reload_secs`.
+    errors: RwLock<Vec<Option<String>>>,
 }
 
 impl std::fmt::Debug for Certs {
@@ -81,7 +84,11 @@ impl Certs {
     /// Load every pair now (see [`Certs::reload`]).
     pub fn new(pairs: Vec<CertPair>) -> Arc<Certs> {
         let n = pairs.len();
-        let c = Arc::new(Certs { pairs, loaded: RwLock::new((0..n).map(|_| None).collect()) });
+        let c = Arc::new(Certs {
+            pairs,
+            loaded: RwLock::new((0..n).map(|_| None).collect()),
+            errors: RwLock::new(vec![None; n]),
+        });
         c.reload();
         c
     }
@@ -99,9 +106,20 @@ impl Certs {
                 Ok((leaf, key)) => {
                     info!("router TLS: loaded {}", p.cert_file);
                     self.loaded.write().unwrap()[i] = Some(Loaded { leaf, key, stamp });
+                    self.errors.write().unwrap()[i] = None;
                 }
-                Err(e) if current.is_some() => warn!("router TLS: {} changed but does not load, keeping the last good one: {e:#}", p.cert_file),
-                Err(e) => warn!("router TLS: {}: {e:#}", p.cert_file),
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    let mut errors = self.errors.write().unwrap();
+                    if errors[i].as_deref() != Some(msg.as_str()) {
+                        if current.is_some() {
+                            warn!("router TLS: {} changed but does not load, keeping the last good one: {msg}", p.cert_file);
+                        } else {
+                            warn!("router TLS: {}: {msg} (checked again every reload; logged once)", p.cert_file);
+                        }
+                        errors[i] = Some(msg);
+                    }
+                }
             }
         }
         self.count()
