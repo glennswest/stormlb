@@ -108,7 +108,6 @@ Unit-tested; `tests/balancer.rs` drives round-robin and failover through the rea
 | Router credentials for the apiserver, and a CA file to verify it | **done** (#9, #10); set in the golden with #21 |
 | TLS on `:443` (`[router.tls]`: SNI, reload, 308 from `:80`) | **done** (#14); not in the golden until stormcos#363 mints and mounts the wildcard |
 | TLS to HTTPS-only backends (stormcos#81) | **done** (#13): `storm.io/backend-protocol: https`, verified against `backend_ca_file`; the golden sets it once stormcos#363 mounts the CA |
-| BGP reacting faster than the 60 s keepalive tick, waiting for Established, hold timer | **planned**, #6 |
 | Running the test container on test machines | runner shipped (`stormcentral test run`); `test/requires.toml` declares `host_network` (all suites) and the `nodes` read (`long`), `test/build.sh` builds the binary: **ready, not yet run on a test machine** |
 | 4-octet ASNs, MP-BGP, IPv6 | follow-ups |
 | Wildcard hosts, path/header matches, 502 on a dead backend | not done (router) |
@@ -177,7 +176,6 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 
 - stormcos#363: the router's certificate isn't minted, and `/data/stormcert` isn't mounted, so the golden serves plain `:80` and https routes fail closed (stormcos#81)
 - #21: the golden's router reads anonymously until stormcos mints its token and mounts `/data/stormcert` (stormcos#76, #363)
-- #6: BGP reacts only on the 60 s tick
 
 ---
 

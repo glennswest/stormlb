@@ -3,6 +3,17 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **fix:** BGP follows health at once (#6). Announce and withdraw are driven
+  by a health watch checked every 250 ms, not the 60 s keepalive tick, and
+  the session announces on Established. The session now waits for the
+  peer's OPEN (checked: version 4, the configured AS, hold 0 or >= 3 s, with
+  the RFC NOTIFICATION otherwise) and KEEPALIVE before any UPDATE, uses the
+  smaller hold time, sends keepalives every third of it, and drops a peer
+  silent for a hold time (Hold Timer Expired). Messages are read by a task
+  of their own, so a select! can no longer cut one in half.
+- **feat:** `[[bgp.peers]] port` (default 179).
+- **docs:** README (BGP, `[[bgp.peers]]`, gaps), design.md, deck, example.
+
 - **feat:** the router's identity toward the apiserver (#9, #10).
   `[router] token_file` (its ServiceAccount's bearer token, owner's choice in
   stormcos#203) is sent on every apiserver request and re-read each poll; a

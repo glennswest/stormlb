@@ -44,7 +44,8 @@ local_asn = 64512
 router_id = "192.168.8.51"
 # [[bgp.peers]]
 # address = "192.168.8.1"
-# asn = 64512
+# asn = 64512                 # the peer's OPEN must carry it
+# port = 179
 
 # The VIP API: named VIPs made and changed at runtime (stormcluster keeps
 # the cluster's API VIP in front of the masters through it). Present =

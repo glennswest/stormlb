@@ -165,7 +165,7 @@ probed at once rather than after an interval.
 | `enabled` | `false` | |
 | `local_asn` | `0` | Must be 1–65535. 2-byte ASNs only. |
 | `router_id` | `""` | This node's IPv4. It is the BGP identifier **and** the next-hop advertised for the VIP. |
-| `[[bgp.peers]]` `address`, `asn` | none | IPv4 peers. stormlb dials each on TCP 179. `asn` is logged, not checked against the peer's OPEN. |
+| `[[bgp.peers]]` `address`, `asn`, `port` | none; `port` 179 | IPv4 peers. stormlb dials each on `port`. The peer's OPEN must carry `asn`, or the session is refused with a Bad Peer AS NOTIFICATION. |
 
 If the preflight fails (bad ASN, no peers, `router_id` not IPv4), it logs
 `bgp disabled: …` and everything else keeps running.
@@ -347,14 +347,29 @@ used, so the golden needs none. It needs `CAP_NET_ADMIN` (the address) and
 ### BGP (L3)
 
 A minimal speaker: one outbound session per peer, reconnecting every 5 s
-after failure. It sends OPEN (version 4, hold 180 s, no optional parameters)
-and KEEPALIVE every 60 s. It announces `<vip>/32` (ORIGIN IGP, AS_PATH
-`[local_asn]`, NEXT_HOP `router_id`) while this node has at least one healthy
-backend, and withdraws it otherwise. Received messages are read and
-discarded; a NOTIFICATION ends the session. IPv4 unicast only. Every healthy
-node advertises the same /32, so the upstream router ECMP-hashes across them.
-Announce/withdraw latency is up to 60 s today
-([#6](https://github.com/glennswest/stormlb/issues/6)).
+after failure. The session follows RFC 4271's FSM as far as a speaker that
+originates one route needs (#6):
+
+1. It sends OPEN (version 4, hold 180 s, no optional parameters).
+2. It reads the peer's OPEN, within 4 minutes, and checks it. The version
+   must be 4, the AS must be the configured `asn`, and the hold time must be
+   0 or at least 3 s. Otherwise it sends the matching OPEN Message Error
+   NOTIFICATION (subcode 1, 2 or 6) and drops the session.
+3. It answers with a KEEPALIVE and waits for the peer's. Only then is the
+   session Established, and only then is any UPDATE sent.
+4. The hold time is the smaller of 180 s and the peer's. KEEPALIVEs go
+   every third of it, and a peer that sends nothing for a whole hold time
+   gets a Hold Timer Expired NOTIFICATION and the session is dropped.
+   Hold 0 means neither.
+
+It announces `<vip>/32` (ORIGIN IGP, AS_PATH `[local_asn]`, NEXT_HOP
+`router_id`) while the config VIP has at least one healthy backend, and
+withdraws it otherwise. Health is checked every 250 ms, and a change is sent
+at once, so a withdraw follows a failed health check within a quarter
+second (it waited for the 60 s keepalive tick before #6). On Established it
+announces right away if healthy. Received UPDATEs are read and ignored; a
+NOTIFICATION ends the session. IPv4 unicast only. Every healthy node
+advertises the same /32, so the upstream router ECMP-hashes across them.
 
 ## Ports and endpoints
 
@@ -580,9 +595,6 @@ What the code does not do yet, which older docs implied it did:
   (stormcos#76 step 2) and `/data/stormcert` mounted into its container
   (stormcos#363), so the shipped router still reads anonymously, against
   sno and bastion only.
-- [#6](https://github.com/glennswest/stormlb/issues/6): BGP reconciles
-  announce/withdraw only on the 60 s keepalive tick. It doesn't wait for
-  Established or enforce a hold timer.
 - [stormcluster#35](https://github.com/glennswest/stormcluster/issues/35):
   a cluster's API VIP can't listen on `:6443` on a master, because the
   apiserver binds `0.0.0.0:6443` there. The VIP's port is stormcluster's

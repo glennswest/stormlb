@@ -86,9 +86,11 @@ the network.
 - The VRRP master-down time is 3.6 s at a 1 s advert interval. That's the RFC
   formula, not the "sub-second" earlier docs claimed. Going sub-second needs
   a sub-second advert interval, and the config only takes whole seconds.
-- BGP withdraws on "no healthy backends", but only on the next 60 s keepalive
-  tick ([#6](https://github.com/glennswest/stormlb/issues/6)). Route-withdraw
-  failover is as fast as that tick, not as fast as the health check.
+- BGP route-withdraw failover is as fast as the health check plus 250 ms,
+  now that announce and withdraw follow health as it changes rather than the
+  60 s keepalive tick (#6). It also needs the session Established and
+  enforces the negotiated hold time, so a dead peer is noticed within that
+  time, not only when TCP fails.
 - 4-octet ASNs, multiprotocol BGP and IPv6 are follow-ups.
 
 **VRRP ownership follows health, not just liveness** (#7). Plain VRRP moves
