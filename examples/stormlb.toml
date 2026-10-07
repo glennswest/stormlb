@@ -61,3 +61,11 @@ router_id = "192.168.8.51"
 # apiserver = "https://127.0.0.1:6443"
 # poll_secs = 5
 # insecure = true                        # leave on: no CA-file key, webpki roots only (stormlb#10)
+#
+# TLS for routed hosts: certificates by SNI, re-read when they change; :80
+# redirects to https (except /healthz) once one is loaded.
+# [router.tls]
+# listen = "auto:443"
+# certs = [{ cert_file = "/data/stormcert/router.crt", key_file = "/data/stormcert/router.key" }]
+# redirect = true
+# reload_secs = 30

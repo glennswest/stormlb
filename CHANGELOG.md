@@ -3,6 +3,21 @@
 ## [Unreleased]
 
 ### 2026-10-06
+- **feat:** the router terminates TLS (#14). `[router.tls]` (`listen`,
+  default `auto:443`; `certs`, PEM pairs; `redirect`, default on;
+  `reload_secs`, default 30) adds a TLS listener that feeds the same demux.
+  The certificate is chosen per handshake by SNI (webpki's name check, so a
+  wildcard covers one label; else the first pair), and files are re-read
+  when they change, keeping the last good pair if a new one fails. Once a
+  certificate is loaded, plain HTTP gets a 308 to https, except `/healthz`.
+  TLS requests reach the backend with `X-Forwarded-Proto: https` (a client's
+  own is dropped). A TLS port that can't be bound is logged, not fatal.
+  `tokio-rustls` and `rustls-webpki` become direct dependencies (both
+  already locked). Filed stormcos#363 to mint `*.storm1.<zone>` and mount
+  it, before the golden turns it on.
+- **docs:** README (`[router.tls]`, router, ports, SECURITY note, tests,
+  gaps), design.md, deck, example.
+
 - **feat:** VRRP per RFC 5798 §6.4 (#7). A Backup preempts a
   lower-priority Master (new `preempt` key, default on, in `[vrrp]` and the
   API's `vrrp`), learns the Master's advertisement interval, and waits only

@@ -139,10 +139,16 @@ metrics ([#12](https://github.com/glennswest/stormlb/issues/12)); a node's
 ironprom scrapes only stormd's `:180` for stormlb (stormcos#64).
 
 TLS is now a requirement, not an option: stormcos#81 has every node listener
-serve TLS with a stormcert certificate and authenticate. The router is
-plaintext on both sides. It listens only on plain `:80`
-([#14](https://github.com/glennswest/stormlb/issues/14)), and it dials
-every backend over bare TCP, so an HTTPS-only backend can't be routed
+serve TLS with a stormcert certificate and authenticate. The router
+terminates TLS (`[router.tls]`, #14). The certificate is a file pair, not
+something the router mints or fetches: stormcert issues it, stormcos
+mounts it (stormcos#363), and the router re-reads it when it changes. So
+the router doesn't depend on how stormcert will deliver per-route
+certificates (stormcert#1, gap 3): any number of pairs, chosen by SNI,
+already works. `:80` redirects once a certificate is loaded, never before,
+so a node without one keeps working over plain HTTP. `/healthz` stays plain
+because the health probe is the one exemption #81 allows. The router still
+dials every backend over bare TCP, so an HTTPS-only backend can't be routed
 ([#13](https://github.com/glennswest/stormlb/issues/13)).
 
 Its apiserver client is the other gap. The router reads anonymously, which

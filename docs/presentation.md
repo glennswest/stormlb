@@ -106,7 +106,8 @@ Unit-tested; `tests/balancer.rs` drives round-robin and failover through the rea
 | | Status |
 |---|---|
 | Router credentials for the apiserver, and a CA file to verify it | **planned**, #9, #10 |
-| TLS on `:443` with the stormcert wildcard, and TLS to HTTPS-only backends (stormcos#81) | **planned**, #14, #13 |
+| TLS on `:443` (`[router.tls]`: SNI, reload, 308 from `:80`) | **done** (#14); not in the golden until stormcos#363 mints and mounts the wildcard |
+| TLS to HTTPS-only backends (stormcos#81) | **planned**, #13 |
 | Prometheus `/metrics` (stormcos#64) | **planned**, #12 |
 | BGP reacting faster than the 60 s keepalive tick, waiting for Established, hold timer | **planned**, #6 |
 | Running the test container on test machines | runner shipped (`stormcentral test run`); `test/requires.toml` declares `host_network` (all suites) and the `nodes` read (`long`), `test/build.sh` builds the binary: **ready, not yet run on a test machine** |
@@ -143,7 +144,8 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 
 | Port | What |
 |---|---|
-| **80** (router `listen`) | plain HTTP/1.x, no auth (#14), from clients via `*.storm1.<zone>`; stormd's probe on `127.0.0.1:80/healthz` |
+| **80** (router `listen`) | plain HTTP/1.x, no auth, from clients via `*.storm1.<zone>`; stormd's probe on `127.0.0.1:80/healthz`; 308 to https once a certificate is loaded |
+| **443** (`[router.tls] listen`) | TLS, then the same demux; not in the golden until stormcos#363 |
 | `[vip] port`, e.g. 6443, and each API VIP's port | kube-api clients via the VIP (not 6443 on a master: stormcluster#35) |
 | **127.0.0.1:9103** (`[api]`) | the VIP API, for stormcluster on the node |
 | IP proto 112 → `224.0.0.18` | VRRP peers |
@@ -173,7 +175,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 
 **Open issues that matter**
 
-- #14, #13: plaintext on both sides — no TLS listener, no TLS to backends (stormcos#81)
+- #13: no TLS to backends; stormcos#363: the router's certificate isn't minted or mounted yet, so the golden serves plain `:80` (stormcos#81)
 - #9: the router reads anonymously, so it works only on sno and bastion (`--dev-anonymous-admin`)
 - #10: no CA-file key, so the apiserver's certificate is never verified
 - #6: BGP reacts only on the 60 s tick

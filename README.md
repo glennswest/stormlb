@@ -84,6 +84,15 @@ exists because `0.0.0.0:80` includes `169.254.169.254:80`, which stormimds
 `EADDRINUSE`. If no address can be found it warns and falls back to
 `0.0.0.0:<port>`.
 
+### `[router.tls]`: TLS for routed hosts (present = enabled)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `listen` | `"auto:443"` | Where the TLS listener binds, as for `[router] listen`. If it can't be bound, the router logs it and serves plain HTTP only (no crash loop that would take `:80` and the health probe with it). |
+| `certs` | `[]` | `[{ cert_file = "…", key_file = "…" }, …]`: PEM pairs, the chain leaf first. Each handshake gets the first pair whose certificate is valid for the SNI name (webpki's check: a wildcard covers exactly one label); with no SNI, or a name none covers, the first pair. |
+| `redirect` | `true` | Once a certificate is loaded, plain HTTP gets `308` to `https://<host>[:<port>]<path?query>`, except `/healthz`. With nothing loaded, plain HTTP is served as before. |
+| `reload_secs` | `30` (min 1) | How often the files are checked. A pair whose files changed is re-read, so a renewal is served without a restart. One that fails to load (unreadable, not PEM, a key that isn't the certificate's) keeps its last good version and is logged. |
+
 ### `[api]`: the VIP API (present = enabled)
 
 | Key | Default | Meaning |
@@ -187,10 +196,11 @@ If the preflight fails (bad ASN, no peers, `router_id` not IPv4), it logs
     A host a route does claim gets its `/healthz` proxied to the backend.
   - If a backend can't be dialled, the connection closes with no response
     (logged at `debug`). There is no 502.
-- **Plaintext on both sides.** It listens only for plain HTTP; there is no
-  TLS listener and no certificate key
-  ([#14](https://github.com/glennswest/stormlb/issues/14)). The connection
-  to the backend is a bare TCP dial, so a backend that serves only HTTPS
+- **TLS in, plaintext out.** With `[router.tls]`, a second listener
+  terminates TLS (ALPN `http/1.1`) and feeds the same demux. The head sent
+  to the backend gains `X-Forwarded-Proto: https`, and any
+  `X-Forwarded-Proto` the client sent is dropped. Plain-HTTP requests carry
+  the head unchanged. The connection to the backend is a bare TCP dial, so a backend that serves only HTTPS
   (the apiserver, cadvisor under stormcos#81) can't sit behind a route: it
   receives plaintext and the client sees the connection close
   ([#13](https://github.com/glennswest/stormlb/issues/13)). A client's
@@ -329,6 +339,7 @@ Announce/withdraw latency is up to 60 s today
 | Port | Proto | Who | When |
 |---|---|---|---|
 | `[router] listen`: **80** in the golden | TCP, plain HTTP/1.x, no auth | clients via `*.storm1.<zone>`; stormd's liveness probe on `127.0.0.1:80/healthz` | `[router]` present |
+| `[router.tls] listen`: **443** | TLS 1.2/1.3, then HTTP/1.x | clients via `*.storm1.<zone>` | `[router.tls]` present (not in the golden yet: stormcos#363) |
 | `[vip] port`, e.g. 6443, and each API VIP's `port` | TCP | kube-api clients via the VIP | `[vip]` present, or a VIP made through the API |
 | `[api] listen`: **127.0.0.1:9103** by default | plain HTTP, JSON; a bearer token with `token_file` | stormcluster, on the same node | `[api]` present |
 | n/a | IP proto 112 to `224.0.0.18` | VRRP peers | `[vrrp] enabled` |
@@ -336,9 +347,12 @@ Announce/withdraw latency is up to 60 s today
 | 180 in the golden | plain HTTP, no auth | **stormd's** API, not stormlb's (port + 100, stormcentral's convention). Its TLS and auth are stormd#32. | golden |
 
 stormcos#81 requires every listener on a node to be TLS with a stormcert
-certificate and to authenticate, health probes excepted. stormcos
-`docs/SECURITY.md` lists `:80` as failing that rule until
-[#14](https://github.com/glennswest/stormlb/issues/14) lands.
+certificate and to authenticate, health probes excepted. The router can
+serve TLS (`[router.tls]`, #14), but no node has its certificate yet:
+minting `*.storm1.<zone>` and mounting it into stormlb's container is
+stormcos#363. Until then the golden serves plain `:80` only, which
+stormcos `docs/SECURITY.md` lists as failing the rule. A routed host's own
+authentication is its backend's.
 
 **Health:** the router's `/healthz` (above), and the API's `/healthz`.
 Each VIP's backends' health and VRRP state are in `GET /api/v1/vips`; a VIP
@@ -419,6 +433,15 @@ stay keep their health, a proxied connection survives), move the listener,
 remove, refused changes leaving the VIP serving, the token, a restart from
 `state_file`, the config VIP read-only, and https health against a CA file
 (certificates made with `openssl` at test time; skipped without it).
+`tests/router_tls.rs` runs the real router against a fake apiserver with one
+route, and certificates made with `openssl`: plain HTTP served while no
+certificate exists, the files picked up when they appear, SNI choosing the
+wildcard, the exact pair, or the first (no SNI), names no pair covers
+refused by the client (`a.b.` under a one-label wildcard included), the 308
+with path and query, `/healthz` still plain, `X-Forwarded-Proto: https` at
+the backend with the client's own dropped, a renewal served without a
+restart, a broken file keeping the last good one, and a mismatched key
+refused.
 
 VRRP on a real wire, with no root: `tests/vrrp-netns.sh` runs two stormlb
 processes in two network namespaces joined by a veth, inside an unprivileged
@@ -525,8 +548,9 @@ What the code does not do yet, which older docs implied it did:
   endpoint (stormcos#64).
 - [#13](https://github.com/glennswest/stormlb/issues/13): the upstream
   connection is always plaintext, so an HTTPS-only backend can't be routed.
-- [#14](https://github.com/glennswest/stormlb/issues/14): the router listens
-  only on plain `:80`; no TLS termination (stormcos#81).
+- [stormcos#363](https://github.com/glennswest/stormcos/issues/363): the
+  router can terminate TLS, but no node mints its certificate or mounts it
+  into stormlb's container yet, so the golden serves plain `:80` only.
 - Earlier follow-ups: 4-octet ASNs and multiprotocol BGP. VRRP over IPv6
   is not implemented. VRRP's `CAP_NET_ADMIN` and `CAP_NET_RAW` come from
   stormpump keeping every capability for a container today. Once stormpump#47
