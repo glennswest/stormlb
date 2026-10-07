@@ -132,9 +132,10 @@ probed at once rather than after an interval.
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `false` | |
-| `interface` | `""` | Interface to advertise on and to hold the VIP on. Its first IPv4 (from `ip -o -4 addr show dev`) is the source address. |
+| `interface` | `""` | Interface to advertise on and to hold the VIP on. Its own IPv4 (the first that is not a /32, read over rtnetlink) is the source address. |
 | `vrid` | `51` | Virtual router ID. Must match across the nodes sharing the VIP. |
-| `priority` | `100` | 1–255. `255` starts as Master (address owner). Everyone else starts Backup. |
+| `priority` | `100` | 1–255. `255` starts as Master (address owner) if it has a healthy backend. Everyone else starts Backup. |
+| `preempt` | `true` | A Backup takes over from a lower-priority Master (RFC 5798 Preempt_Mode). Off: whoever is Master stays until it goes. |
 | `advert_interval_secs` | `1` (min 1) | Master advertisement interval. Master-down = 3 × interval + skew. |
 
 ### `[bgp]`: L3 anycast advertisement
@@ -282,16 +283,34 @@ VRRP v3 (RFC 5798) over a raw `IPPROTO_VRRP` (112) socket joined to
 thread. An instance stops within half a second when its VIP is removed or
 its VRRP changes, and releases the address if it was Master.
 
+RFC 5798 §6.4, as specified:
+
 - **Master:** sends an advertisement every interval. A peer with a higher
   priority, or equal priority and a higher address, demotes it to Backup,
-  and it releases the VIP.
-- **Backup:** if no advertisement arrives within master-down, it becomes
-  Master and claims the VIP.
+  and it releases the VIP. A peer's priority-0 advertisement is answered
+  with one at once.
+- **Backup:** restarts its master-down timer on an advertisement from a
+  Master of equal or higher priority, and learns that Master's interval.
+  With `preempt` (the default) it **discards** a lower-priority Master's
+  advertisements, so its timer runs out and it takes over. A priority-0
+  advertisement (a Master resigning) cuts the wait to Skew_Time. When
+  master-down passes, it becomes Master and claims the VIP.
+- **Stopping** (the VIP removed, its VRRP changed, the process told to
+  stop): a Master sends priority 0, then releases the VIP.
+- Advertisements carry the RFC checksum over the IPv4 pseudo-header. Ones
+  received with an IP TTL other than 255 or a bad checksum are dropped.
 
-Claim is `ip addr add <vip>/32 dev <iface>` plus a best-effort
-`arping -c 3 -A` (gratuitous ARP). Release is `ip addr del`. Both are
-idempotent. It needs `CAP_NET_ADMIN` and `CAP_NET_RAW`. Known deviations from
-the RFC are in [#7](https://github.com/glennswest/stormlb/issues/7).
+**Ownership follows backend health** (beyond the RFC): a Master whose VIP has
+no healthy backend resigns (priority 0, release), and a Backup with none
+never takes over. The VIP sits on a node that can serve it. If no node has a
+healthy backend, no node holds it. The address owner (255) starts as Backup
+until it has one.
+
+Claim adds `<vip>/32` to the interface over rtnetlink, then broadcasts three
+gratuitous ARP replies, 0.5 s apart, on an `AF_PACKET` socket. Release
+deletes the address. Both are idempotent. No `ip` or `arping` binary is
+used, so the golden needs none. It needs `CAP_NET_ADMIN` (the address) and
+`CAP_NET_RAW` (the VRRP and ARP sockets).
 
 ### BGP (L3)
 
@@ -482,11 +501,6 @@ What the code does not do yet, which older docs implied it did:
 - [#6](https://github.com/glennswest/stormlb/issues/6): BGP reconciles
   announce/withdraw only on the 60 s keepalive tick. It doesn't wait for
   Established or enforce a hold timer.
-- [#7](https://github.com/glennswest/stormlb/issues/7): a VRRP Backup never
-  preempts a lower-priority Master, and priority 0 isn't handled. VIP
-  ownership ignores backend health. It relies on `ip` and `arping` binaries,
-  which the golden doesn't carry. Until it lands, an API VIP with `vrrp`
-  can't claim its address in the golden.
 - [stormcluster#35](https://github.com/glennswest/stormcluster/issues/35):
   a cluster's API VIP can't listen on `:6443` on a master, because the
   apiserver binds `0.0.0.0:6443` there. The VIP's port is stormcluster's
@@ -499,5 +513,6 @@ What the code does not do yet, which older docs implied it did:
   connection is always plaintext, so an HTTPS-only backend can't be routed.
 - [#14](https://github.com/glennswest/stormlb/issues/14): the router listens
   only on plain `:80`; no TLS termination (stormcos#81).
-- Earlier follow-ups: 4-octet ASNs and multiprotocol BGP, a priority-0 VRRP
-  resign on shutdown, and netlink-native VIP control.
+- Earlier follow-ups: 4-octet ASNs and multiprotocol BGP. VRRP over IPv6
+  is not implemented. Whether stormd grants the golden `CAP_NET_ADMIN` and
+  `CAP_NET_RAW` hasn't been checked on a node.

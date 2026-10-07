@@ -3,6 +3,23 @@
 ## [Unreleased]
 
 ### 2026-10-06
+- **feat:** VRRP per RFC 5798 §6.4 (#7). A Backup preempts a
+  lower-priority Master (new `preempt` key, default on, in `[vrrp]` and the
+  API's `vrrp`), learns the Master's advertisement interval, and waits only
+  Skew_Time after a priority-0 advertisement. A Master answers priority 0 at
+  once and sends priority 0 when it stops.
+- **feat:** VRRP ownership follows backend health: a Master with no healthy
+  backend resigns, a Backup with none never takes over, and the address
+  owner starts Backup until it has one.
+- **fix:** VRRP advertisements carry the RFC checksum over the IPv4
+  pseudo-header (it covered the VRRP payload alone, which no RFC peer
+  accepts); received ones need IP TTL 255 and a valid checksum.
+- **feat:** the VIP is added and removed over rtnetlink, and announced with
+  raw gratuitous ARP replies on an `AF_PACKET` socket; the interface address
+  is read over rtnetlink. No `ip` or `arping` binary is used (the golden
+  has neither). `libc` becomes a direct dependency (already locked).
+- **docs:** README (VRRP, `preempt`, gaps), design.md, deck, example.
+
 - **feat:** runtime VIPs and the VIP API (#16). `[api]` (default
   `127.0.0.1:9103`) serves `GET/PUT/DELETE /api/v1/vips/{name}` and
   `GET /api/v1/vips`: named VIPs, each with its own listener, backends,

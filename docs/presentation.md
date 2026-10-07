@@ -67,7 +67,7 @@ From stormcentral's relationships graph (`stormcentral check`, `config/stormcent
       │  VIP HALF  [vip] :6443 (not in the shipped golden)           │
       │   health loop (tcp|http|https) → healthy set                 │
       │   L4 proxy: round-robin over healthy backends, splice        │
-      │   VRRP thread: own the VIP on one node (ip addr + arping)    │
+      │   VRRP thread: own the VIP on one node (netlink + raw ARP)   │
       │   BGP tasks:   announce VIP/32 while ≥1 backend is healthy   │
       └──────────────────────────────────────────────────────────────┘
 ```
@@ -94,7 +94,7 @@ Router only if there is no `[vip]`. Otherwise the L4 balancer runs in the foregr
 - **L4 proxy:** round-robin over *healthy* backends, TCP_NODELAY, splice. Backends start unhealthy; the first passing check admits them.
 - **Health checks:** `tcp` connect, or `http`/`https` `GET /readyz` with an expected status; `https` verified against `ca_file` (the cluster CA) when given. Checks every 2 s with a 2 s timeout by default.
 - **VIP API (`[api]`, #16):** `PUT`/`GET`/`DELETE /api/v1/vips/{name}` on `127.0.0.1:9103`. Named VIPs with their own backends, health and VRRP. A change is validated and bound before it is applied; backends that stay keep their health; proxied connections are never cut; saved to `state_file`.
-- **VRRP v3:** raw IP proto 112 to `224.0.0.18`. Master sends adverts; Backup takes over after the master-down time (3.6 s at defaults). Claim is `ip addr add <vip>/32` plus a gratuitous `arping`.
+- **VRRP v3 (RFC 5798 §6.4):** raw IP proto 112 to `224.0.0.18`. Master sends adverts; Backup takes over after the master-down time (3.6 s at defaults), preempts a lower-priority Master, and takes over after Skew_Time when a Master resigns (priority 0). Ownership follows backend health. Claim is `<vip>/32` over rtnetlink plus a raw gratuitous ARP: no `ip` or `arping` needed (#7).
 - **BGP:** minimal speaker, one outbound session per peer on TCP 179. Announces `<vip>/32` with NEXT_HOP = `router_id` while a backend is healthy, and withdraws it otherwise. Upstream ECMP gives active-active.
 
 Unit-tested; `tests/balancer.rs` drives round-robin and failover through the real proxy, and `tests/vips.rs` drives the API end to end (create, change backends, move, remove, refusals, token, restart from `state_file`, CA-verified https health). VRRP and BGP on the wire are **not** covered by tests.
@@ -108,10 +108,9 @@ Unit-tested; `tests/balancer.rs` drives round-robin and failover through the rea
 | Router credentials for the apiserver, and a CA file to verify it | **planned**, #9, #10 |
 | TLS on `:443` with the stormcert wildcard, and TLS to HTTPS-only backends (stormcos#81) | **planned**, #14, #13 |
 | Prometheus `/metrics` (stormcos#64) | **planned**, #12 |
-| VRRP Backup preempting a lower-priority Master, priority 0, VIP following backend health | **planned**, #7 |
 | BGP reacting faster than the 60 s keepalive tick, waiting for Established, hold timer | **planned**, #6 |
 | Running the test container on test machines | runner shipped (`stormcentral test run`); `test/requires.toml` declares `host_network` (all suites) and the `nodes` read (`long`), `test/build.sh` builds the binary: **ready, not yet run on a test machine** |
-| 4-octet ASNs, MP-BGP, IPv6, netlink instead of `ip`/`arping` | follow-ups |
+| 4-octet ASNs, MP-BGP, IPv6 | follow-ups |
 | Wildcard hosts, path/header matches, 502 on a dead backend | not done (router) |
 | Sub-second VRRP failover (config takes whole seconds) | not possible today |
 
@@ -177,7 +176,6 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 - #14, #13: plaintext on both sides — no TLS listener, no TLS to backends (stormcos#81)
 - #9: the router reads anonymously, so it works only on sno and bastion (`--dev-anonymous-admin`)
 - #10: no CA-file key, so the apiserver's certificate is never verified
-- #7: VRRP preemption, health-driven ownership and netlink (no `ip`/`arping` in the golden): needed before a VIP moves between masters
 - #6: BGP reacts only on the 60 s tick
 - #12: no metrics endpoint
 

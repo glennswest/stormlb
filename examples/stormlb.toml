@@ -32,7 +32,8 @@ enabled = true
 interface = "eth0"
 vrid = 51
 priority = 200             # 255 = address owner, starts Master; others start Backup
-                           # (no preemption from Backup yet: stormlb#7)
+# preempt = true           # a Backup takes over from a lower-priority Master
+                           # Ownership follows health: no healthy backend, no VIP.
 advert_interval_secs = 1
 
 # L3 mode: every node with a healthy backend advertises the VIP /32; the

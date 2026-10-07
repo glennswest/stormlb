@@ -62,9 +62,11 @@ stormcluster to notice. The API is loopback by default: stormcluster runs on
 every node and calls its own stormlb. Anywhere else, it needs a bearer
 token.
 
-**Not yet:** VRRP ownership still has the gaps in #7 (no preemption, not
-health-tied, `ip`/`arping` binaries the golden lacks), so a VIP whose
-address must move between masters needs #7 first.
+**Moving between masters (#7).** Each VIP's VRRP instance follows RFC 5798
+preemption (the highest-priority healthy master holds it), resigns with
+priority 0 when it stops or loses every healthy backend, and claims the
+address over rtnetlink with a raw gratuitous ARP, so the golden needs no
+`ip` or `arping`.
 
 ## L2 vs L3
 
@@ -84,14 +86,20 @@ the network.
 - The VRRP master-down time is 3.6 s at a 1 s advert interval. That's the RFC
   formula, not the "sub-second" earlier docs claimed. Going sub-second needs
   a sub-second advert interval, and the config only takes whole seconds.
-- A VRRP Backup doesn't preempt a lower-priority Master, doesn't handle
-  priority 0, and VIP ownership doesn't follow backend health
-  ([#7](https://github.com/glennswest/stormlb/issues/7)).
 - BGP withdraws on "no healthy backends", but only on the next 60 s keepalive
   tick ([#6](https://github.com/glennswest/stormlb/issues/6)). Route-withdraw
   failover is as fast as that tick, not as fast as the health check.
-- 4-octet ASNs, multiprotocol BGP, IPv6, a priority-0 resign on shutdown, and
-  netlink-native VIP control (instead of `ip` and `arping`) are all follow-ups.
+- 4-octet ASNs, multiprotocol BGP and IPv6 are follow-ups.
+
+**VRRP ownership follows health, not just liveness** (#7). Plain VRRP moves
+the VIP only when its holder stops advertising. A holder whose backends are
+all down would keep the VIP and drop every connection. So a Master with no
+healthy backend resigns (priority 0, so a Backup takes over after Skew_Time,
+well under a second), and a Backup with none never takes over. On the API
+VIP every master checks the same set of apiservers, so this matters when a
+node is cut off from the others, not when one apiserver fails. Preemption
+(RFC default, `preempt = true`) gives the VIP back to the highest-priority
+healthy node when it returns.
 
 ## stormlb vs a DNS load balancer
 
