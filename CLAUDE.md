@@ -282,3 +282,16 @@ deliberate commit of its own.
     clippy and cargo doc -D warnings, test crate. Registry config now has
     [metrics] listen = "auto:9104". Golden golden-stormlb-7c9f586ffc88
     (stormcos#361). Told stormcos the port: stormcos#367.
+- [ ] #13 (P2) TLS to backends.
+  - [ ] Route annotation `storm.io/backend-protocol: https` (and optional
+        `storm.io/backend-server-name` for the name to verify/SNI; default
+        the backend's host, an IP → IP SAN).
+  - [ ] `[router] backend_ca_file`: the CA backends are verified against
+        (only it; no webpki roots). Re-read on the route poll when it
+        changes (it may appear after boot). No CA, or a backend it doesn't
+        verify: the connection fails closed, `upstream_errors{kind="tls"}`.
+  - [ ] splice generic over the upstream stream; ALPN http/1.1.
+  - [ ] Tests (openssl CA, TLS backend: by IP, by server-name, wrong CA,
+        no CA configured), docs, CHANGELOG; sc-build, golden, close #13.
+        Shipped config sets backend_ca_file only once stormcos mounts
+        /data/stormcert into stormlb (stormcos#363) — note there.
