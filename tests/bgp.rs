@@ -48,7 +48,7 @@ struct Play {
 enum Seen {
     Msg(u8, Vec<u8>, Instant),
     SentKeepalive(Instant),
-    Closed(Instant),
+    Closed,
 }
 
 async fn fake_peer(play: Play) -> (u16, mpsc::UnboundedReceiver<Seen>) {
@@ -63,13 +63,13 @@ async fn fake_peer(play: Play) -> (u16, mpsc::UnboundedReceiver<Seen>) {
             loop {
                 let mut hdr = [0u8; 19];
                 if r.read_exact(&mut hdr).await.is_err() {
-                    let _ = txr.send(Seen::Closed(Instant::now()));
+                    let _ = txr.send(Seen::Closed);
                     return;
                 }
                 let len = u16::from_be_bytes([hdr[16], hdr[17]]) as usize;
                 let mut body = vec![0u8; len - 19];
                 if r.read_exact(&mut body).await.is_err() {
-                    let _ = txr.send(Seen::Closed(Instant::now()));
+                    let _ = txr.send(Seen::Closed);
                     return;
                 }
                 let _ = txr.send(Seen::Msg(hdr[18], body, Instant::now()));
@@ -148,7 +148,7 @@ async fn announces_only_when_established_then_follows_health_at_once() {
             Seen::SentKeepalive(at) => established = Some(at),
             Seen::Msg(UPDATE, body, at) if first.is_none() => first = Some((body, at)),
             Seen::Msg(..) => {}
-            Seen::Closed(_) => panic!("session closed"),
+            Seen::Closed => panic!("session closed"),
         }
     }
     let (established, first_update) = (established.unwrap(), first.unwrap());
@@ -187,7 +187,7 @@ async fn a_silent_peer_is_dropped_at_the_hold_time() {
             Seen::Msg(KEEPALIVE, _, _) => keepalives += 1,
             Seen::Msg(NOTIFICATION, body, at) => break (body, at),
             Seen::Msg(..) => {}
-            Seen::Closed(_) => panic!("closed without a NOTIFICATION"),
+            Seen::Closed => panic!("closed without a NOTIFICATION"),
         }
     };
     assert_eq!(body[..2], [4, 0], "Hold Timer Expired");
