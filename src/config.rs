@@ -141,8 +141,15 @@ pub struct VrrpCfg {
     /// Higher wins. 255 = address owner (starts Master).
     #[serde(default = "default_priority")]
     pub priority: u8,
+    /// A Backup takes over from a lower-priority Master (RFC 5798
+    /// Preempt_Mode, default on).
+    #[serde(default = "default_preempt")]
+    pub preempt: bool,
     #[serde(default = "default_advert")]
     pub advert_interval_secs: u64,
+}
+fn default_preempt() -> bool {
+    true
 }
 fn default_vrid() -> u8 {
     51
@@ -217,6 +224,7 @@ priority = 200
         assert_eq!(cfg.health.mode, HealthMode::Https);
         assert!(cfg.vrrp.enabled);
         assert_eq!(cfg.vrrp.priority, 200);
+        assert!(cfg.vrrp.preempt, "preempt defaults on");
         assert!(!cfg.bgp.enabled); // absent section
     }
 

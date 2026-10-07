@@ -13,7 +13,7 @@
 use crate::config::{Config, HealthSpec};
 use crate::health::{self, Checker};
 use crate::pool::Pool;
-use crate::vip::{IpCmd, VipController};
+use crate::vip::{Netlink, VipController};
 use crate::{balancer, vrrp};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -64,6 +64,9 @@ pub struct VrrpSpec {
     /// 1–255, higher wins; 255 = the address owner, starts Master.
     #[serde(default = "default_priority")]
     pub priority: u8,
+    /// Take over from a lower-priority Master (RFC 5798 Preempt_Mode).
+    #[serde(default = "default_preempt")]
+    pub preempt: bool,
     #[serde(default = "default_advert")]
     pub advert_interval_secs: u64,
 }
@@ -75,6 +78,9 @@ fn default_priority() -> u8 {
 }
 fn default_advert() -> u64 {
     1
+}
+fn default_preempt() -> bool {
+    true
 }
 
 /// A VIP as `GET` returns it: the spec, plus where it stands.
@@ -167,7 +173,7 @@ struct Checked {
 
 impl Registry {
     pub fn new(state_file: Option<PathBuf>) -> Self {
-        Self::with_controller(state_file, Arc::new(IpCmd))
+        Self::with_controller(state_file, Arc::new(Netlink))
     }
 
     /// With a given VIP controller (tests use a recording mock).
@@ -182,6 +188,7 @@ impl Registry {
             interface: cfg.vrrp.interface.clone(),
             vrid: cfg.vrrp.vrid,
             priority: cfg.vrrp.priority,
+            preempt: cfg.vrrp.preempt,
             advert_interval_secs: cfg.vrrp.advert_interval_secs,
         });
         Ok(Some(VipSpec {
@@ -302,7 +309,7 @@ impl Registry {
                     if let Some(h) = e.vrrp.take() {
                         h.stop();
                     }
-                    e.vrrp = start_vrrp(name, &spec, c.vrrp_vip, self.ctl.clone());
+                    e.vrrp = start_vrrp(name, &spec, c.vrrp_vip, self.ctl.clone(), e.pool.clone());
                 }
                 e.spec = spec;
                 info!("VIP {name} updated: {} backends", e.pool.backends().len());
@@ -314,7 +321,7 @@ impl Registry {
                 let pool = Arc::new(Pool::new(c.backends));
                 let health = tokio::spawn(health::run(pool.clone(), checker.clone()));
                 let serve = spawn_serve(listener, pool.clone());
-                let vrrp = start_vrrp(name, &spec, c.vrrp_vip, self.ctl.clone());
+                let vrrp = start_vrrp(name, &spec, c.vrrp_vip, self.ctl.clone(), pool.clone());
                 info!("VIP {name} serving on {} -> {} backends", c.listen, pool.backends().len());
                 vips.insert(name.to_string(), Entry { spec, from_config, listen: c.listen, pool, checker, health, serve, vrrp });
                 Ok(true)
@@ -384,14 +391,25 @@ fn bind(listen: SocketAddr) -> Result<tokio::net::TcpListener, ApplyError> {
     balancer::bind(listen).map_err(|e| ApplyError::Conflict(format!("{e:#}")))
 }
 
-fn start_vrrp(name: &str, spec: &VipSpec, vip: Option<Ipv4Addr>, ctl: Arc<dyn VipController>) -> Option<Arc<vrrp::Handle>> {
+/// Start the VIP's VRRP instance. It holds the address only while the VIP has
+/// a healthy backend.
+fn start_vrrp(name: &str, spec: &VipSpec, vip: Option<Ipv4Addr>, ctl: Arc<dyn VipController>, pool: Arc<Pool>) -> Option<Arc<vrrp::Handle>> {
     let (v, vip) = (spec.vrrp.clone()?, vip?);
     let h = Arc::new(vrrp::Handle::default());
     let h2 = h.clone();
     let name = name.to_string();
+    let params = vrrp::Params {
+        vrid: v.vrid,
+        priority: v.priority,
+        preempt: v.preempt,
+        advert_interval_secs: v.advert_interval_secs,
+        iface: v.interface,
+        vip,
+    };
+    let healthy: vrrp::Healthy = Arc::new(move || pool.healthy_count() > 0);
     // VRRP is a blocking control loop (raw socket) — its own OS thread.
     std::thread::spawn(move || {
-        if let Err(e) = vrrp::run(v.vrid, v.priority, v.advert_interval_secs, &v.interface, vip, ctl, h2) {
+        if let Err(e) = vrrp::run(params, ctl, healthy, h2) {
             warn!("VIP {name}: VRRP exited: {e:#}");
         }
     });
