@@ -19,7 +19,7 @@ docs/design.md, as of the commit this file was last changed in.
 One static Rust binary, two independent halves:
 
 - **Router** (`[router]`): an L7 Host-header demux over Gateway API HTTPRoutes. *Ships today.*
-- **VIP half** (`[vip]`): a health-checked L4 proxy for the kube-api VIP, presented by VRRP (L2) or BGP anycast (L3). *Implemented, not shipped.*
+- **VIP half** (`[vip]`, `[api]`): a health-checked L4 proxy for the kube-api VIP, presented by VRRP (L2) or BGP anycast (L3). VIPs can be made and changed at runtime through an HTTP API, for stormcluster (#16).
 
 ---
 
@@ -89,14 +89,15 @@ Router only if there is no `[vip]`. Otherwise the L4 balancer runs in the foregr
 
 ---
 
-## What works today: the VIP half (implemented, not shipped)
+## What works today: the VIP half (the API ships; no VIP until stormcluster makes one)
 
 - **L4 proxy:** round-robin over *healthy* backends, TCP_NODELAY, splice. Backends start unhealthy; the first passing check admits them.
-- **Health checks:** `tcp` connect, or `http`/`https` `GET /readyz` with an expected status. Checks every 2 s with a 2 s timeout by default.
+- **Health checks:** `tcp` connect, or `http`/`https` `GET /readyz` with an expected status; `https` verified against `ca_file` (the cluster CA) when given. Checks every 2 s with a 2 s timeout by default.
+- **VIP API (`[api]`, #16):** `PUT`/`GET`/`DELETE /api/v1/vips/{name}` on `127.0.0.1:9103`. Named VIPs with their own backends, health and VRRP. A change is validated and bound before it is applied; backends that stay keep their health; proxied connections are never cut; saved to `state_file`.
 - **VRRP v3:** raw IP proto 112 to `224.0.0.18`. Master sends adverts; Backup takes over after the master-down time (3.6 s at defaults). Claim is `ip addr add <vip>/32` plus a gratuitous `arping`.
 - **BGP:** minimal speaker, one outbound session per peer on TCP 179. Announces `<vip>/32` with NEXT_HOP = `router_id` while a backend is healthy, and withdraws it otherwise. Upstream ECMP gives active-active.
 
-Unit-tested, and `tests/balancer.rs` drives round-robin and failover through the real proxy. VRRP and BGP on the wire are **not** covered by tests.
+Unit-tested; `tests/balancer.rs` drives round-robin and failover through the real proxy, and `tests/vips.rs` drives the API end to end (create, change backends, move, remove, refusals, token, restart from `state_file`, CA-verified https health). VRRP and BGP on the wire are **not** covered by tests.
 
 ---
 
@@ -128,9 +129,10 @@ One TOML file; a section's presence enables it:
 | Section | Keys (defaults) |
 |---|---|
 | `[router]` | `listen` (`0.0.0.0:80`), `apiserver` (`https://127.0.0.1:6443`), `poll_secs` (5), `insecure` (true) |
+| `[api]` | `listen` (`127.0.0.1:9103`), `token_file`, `state_file` |
 | `[vip]` | `address`, `port` (required), `bind` (`0.0.0.0`) |
 | `[[backend]]` | `address` (IP literal), `port` |
-| `[health]` | `mode` (tcp), `path` (`/readyz`), `interval_secs` (2), `timeout_secs` (2), `expect_status` ([200]) |
+| `[health]` | `mode` (tcp), `path` (`/readyz`), `interval_secs` (2), `timeout_secs` (2), `expect_status` ([200]), `ca_file` |
 | `[vrrp]` | `enabled` (false), `interface`, `vrid` (51), `priority` (100), `advert_interval_secs` (1) |
 | `[bgp]` | `enabled` (false), `local_asn`, `router_id`, `[[bgp.peers]]` `address`/`asn` |
 
@@ -143,12 +145,13 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 | Port | What |
 |---|---|
 | **80** (router `listen`) | plain HTTP/1.x, no auth (#14), from clients via `*.storm1.<zone>`; stormd's probe on `127.0.0.1:80/healthz` |
-| `[vip] port`, e.g. 6443 | kube-api clients via the VIP |
+| `[vip] port`, e.g. 6443, and each API VIP's port | kube-api clients via the VIP (not 6443 on a master: stormcluster#35) |
+| **127.0.0.1:9103** (`[api]`) | the VIP API, for stormcluster on the node |
 | IP proto 112 → `224.0.0.18` | VRRP peers |
 | 179, outbound only | BGP peers |
 | 180 | **stormd's** API in the golden, not stormlb's; plain, no auth (stormd#32) |
 
-- **Health:** the router's `/healthz` is the only endpoint. The VIP half has none; its state shows in the logs and in `ip addr`.
+- **Health:** the router's `/healthz`, the API's `/healthz`, and each VIP's backends and VRRP state in `GET /api/v1/vips`.
 - **Metrics:** none (#12). The node's ironprom scrapes stormd's `:180`: state and restarts, not the router's memory or fds (stormd#33).
 
 ---
@@ -156,7 +159,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 ## How it ships and is operated
 
 - **Golden kind:** stormcentral `service`, a 32 MiB `stormlb` golden on pallet `system1`. It holds the static musl `/usr/sbin/stormlb` in a stormd base, plus `stormlb-data` (`/var/lib/stormlb`) and `stormlb-logs` (`/var/log/stormd`).
-- **Baked config:** router only, `[router] listen = "auto:80"`.
+- **Baked config:** `[router] listen = "auto:80"` and `[api] state_file = "/var/lib/stormlb/vips.json"` (API on `127.0.0.1:9103`).
 - **How it starts:** no systemd; stormpump is PID 1. stormcos `build-goldens.sh` writes a `spec stormlb` stanza into `boot.d/40-services`: a container on the host network profile, sharing UTS. On the **sno** and **bastion** profiles it also writes `start stormlb`. stormd then runs it with `--config /etc/stormlb/stormlb.toml`, restarts it on exit and probes `/healthz`.
 - **How it is updated:** push → `sc-build` on dev.g8.lo → `stormcentral component build stormlb`. That builds an immutable golden from the exact commit (`--release --locked`, musl) and files a stormcos release request. A stormcos release then carries the new golden to nodes.
 
@@ -165,16 +168,16 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 ## Status
 
 - **Version** 0.1.0 (pre-1.0; `Cargo.toml` is the only version location).
-- **Shipping:** the router, in every stormcos build that includes stormlb, and started on sno and bastion nodes.
-- **Not shipping:** the VIP half. On a single node the VIP is the node's own address, so nothing needs to float yet.
-- **Tests:** 25 unit and integration tests (`cargo test --locked` through `sc-build`), plus the `test/` container: short, medium and long suites against the router on a node, proven by a hermetic harness. The suites declare what they need of the node in `test/requires.toml`; they have not yet run on a test machine.
+- **Shipping:** the router and the VIP API (loopback, `state_file` on the data volume), in every stormcos build that includes stormlb, and started on sno and bastion nodes.
+- **Not yet used:** no node serves a VIP until stormcluster makes one (stormcluster#10, and its port, stormcluster#35). On a single node the VIP is the node's own address, so nothing needs to float.
+- **Tests:** unit and integration tests (`cargo test --locked` through `sc-build`), plus the `test/` container: short, medium and long suites against the router on a node, proven by a hermetic harness. The suites declare what they need of the node in `test/requires.toml`; they have not yet run on a test machine.
 
 **Open issues that matter**
 
 - #14, #13: plaintext on both sides — no TLS listener, no TLS to backends (stormcos#81)
 - #9: the router reads anonymously, so it works only on sno and bastion (`--dev-anonymous-admin`)
 - #10: no CA-file key, so the apiserver's certificate is never verified
-- #7: VRRP preemption and health-driven ownership, before the VIP half can ship to multi-master
+- #7: VRRP preemption, health-driven ownership and netlink (no `ip`/`arping` in the golden): needed before a VIP moves between masters
 - #6: BGP reacts only on the 60 s tick
 - #12: no metrics endpoint
 

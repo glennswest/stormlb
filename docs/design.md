@@ -17,8 +17,54 @@ Cilium owns in-cluster Service traffic (eBPF LB, LB-IPAM, BGP / L2
 announcements).
 
 **Status:** implemented (`[vip]`, `[[backend]]`, `[health]`, `[vrrp]`,
-`[bgp]`) but **not shipped**. The stormcos golden is router-only. On a single
-node the VIP is the node's own address, so nothing needs to float.
+`[bgp]`, and the VIP API `[api]`). The stormcos golden runs the router and
+the API, with no VIP until stormcluster makes one. On a single node the VIP
+is the node's own address, so nothing needs to float.
+
+## A VIP whose backends change at runtime (#16)
+
+When stormcluster forms a cluster from SNO nodes, kubelets and controllers
+talk to one API endpoint that survives any single master going down: a VIP
+in front of every master's `:6443` (owner's decision, stormcos#47,
+2026-10-02). The set of masters changes while the cluster runs (form, join
+as master, promote, demote, split), so the backends can't be fixed at start.
+
+**API, not reload.** stormcluster needs to read the current backends before
+it acts, and to know whether a change took, so it gets an HTTP API
+(`PUT`/`GET`/`DELETE /api/v1/vips/{name}`) rather than a SIGHUP reload of the
+TOML. Each VIP is named, so one process can serve more than one, and each
+carries its own listener, pool, health spec and (optionally) VRRP instance.
+The TOML `[vip]` is the VIP `default`, read-only through the API, so a file
+and an API never fight over one VIP.
+
+**A change never takes the VIP down.** A spec is validated, and any new
+listener bound, before the running VIP is touched; a refusal leaves it as it
+was. A backend that stays keeps its health (re-applying the same masters is
+free), a new one is probed at once, and connections already proxied are
+never cut. stormcluster can therefore apply its whole desired state each
+time, idempotently.
+
+**L4 pass-through.** TLS terminates on the apiservers, whose serving
+certificate lists the VIP among its SANs, so stormlb never holds a key.
+Health is `GET /readyz` over https, verified against the cluster CA
+(`health.ca_file`), so a backend counts only when it is a real apiserver of
+this cluster.
+
+**Binding.** A VIP's listener binds the VIP address with `IP_FREEBIND`, so
+every master listens before it holds the address, and a VRRP takeover needs
+no rebind. It can't share `:6443` with the apiserver's wildcard bind on the
+same node, which is why the VIP's port is stormcluster's choice
+(glennswest/stormcluster#35).
+
+**Persistence and access.** VIPs made through the API are saved to
+`state_file` and served again at start, so a stormlb restart doesn't wait for
+stormcluster to notice. The API is loopback by default: stormcluster runs on
+every node and calls its own stormlb. Anywhere else, it needs a bearer
+token.
+
+**Not yet:** VRRP ownership still has the gaps in #7 (no preemption, not
+health-tied, `ip`/`arping` binaries the golden lacks), so a VIP whose
+address must move between masters needs #7 first.
 
 ## L2 vs L3
 

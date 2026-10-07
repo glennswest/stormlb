@@ -3,9 +3,12 @@
 The Storm stack's load balancer, in Rust. One binary with two independent
 halves:
 
-- **The VIP half** (`[vip]`): a health-checked L4 (TCP) proxy for the
-  control-plane VIP. VRRP (L2) or BGP anycast (L3) presents the VIP to the
-  network. It is the pre-cluster kube-api VIP: it has to exist before the
+- **The VIP half** (`[vip]`, and the VIP API `[api]`): a health-checked L4
+  (TCP) proxy for the control-plane VIP. VRRP (L2) or BGP anycast (L3)
+  presents the VIP to the network. VIPs can also be made and changed at
+  runtime through a small HTTP API, which is how stormcluster keeps a
+  cluster's API VIP in front of whichever nodes are masters
+  ([VIP API](#vip-api)). It is the pre-cluster kube-api VIP: it has to exist before the
   cluster does, and Cilium can't provide it because Cilium runs as a workload
   and can't front its own apiserver. It fills the `keepalived + haproxy` role
   from OpenShift on-prem.
@@ -13,9 +16,10 @@ halves:
   demux over Gateway API HTTPRoutes, standing where the wildcard
   `*.storm1.<zone>` DNS name lands (stormpump `docs/routing.md`).
 
-**What ships today is the router alone.** The stormcos golden is configured
-with `[router]` and nothing else (see [How it ships](#how-it-ships)). The VIP
-half is implemented and unit-tested, but no shipped node runs it yet. See
+**What ships today is the router and the VIP API.** The stormcos golden is
+configured with `[router]` and `[api]` (see [How it ships](#how-it-ships)), so
+a node serves no VIP until stormcluster makes one through the API. The VIP
+half is implemented and tested, but no shipped node serves a VIP yet. See
 [Gaps](#gaps-known-and-filed) before relying on it.
 
 **Scope split:** stormlb owns inbound: the control-plane VIP and the Host
@@ -47,13 +51,16 @@ At start it:
 
 1. Reads and parses the TOML. A missing file or a parse error exits non-zero
    and names the path.
-2. Resolves every `[[backend]]` to `ip:port`. A bad address exits.
-3. Runs **router only** if there is no `[vip]` and there is a `[router]`.
-   If neither is present it exits with `nothing to do`.
-4. Otherwise it parses `vip.address` as IPv4 (exits if it can't), then starts
-   the health loop, VRRP (if enabled), BGP (if enabled and its preflight
-   passes), and the router (if present). Finally it runs the L4 balancer in
-   the foreground.
+2. Exits with `nothing to do` if none of `[vip]`, `[router]` and `[api]` is
+   present.
+3. Starts `[vip]` as the VIP named `default`: its `[[backend]]` pool, the
+   health loop, the L4 listener and VRRP (if enabled). A bad address, a bad
+   `ca_file` or a listener that can't bind exits non-zero. Then BGP (if
+   enabled and its preflight passes).
+4. With `[api]`: starts the VIPs saved in `state_file` (one that no longer
+   starts is logged and kept in the file), then the API.
+5. Runs the router (if present). With the router alone, its exit is the
+   process's; beside a VIP or the API, a router failure is only logged.
 
 ## Configuration
 
@@ -77,15 +84,24 @@ exists because `0.0.0.0:80` includes `169.254.169.254:80`, which stormimds
 `EADDRINUSE`. If no address can be found it warns and falls back to
 `0.0.0.0:<port>`.
 
+### `[api]`: the VIP API (present = enabled)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `listen` | `"127.0.0.1:9103"` | Where the [VIP API](#vip-api) listens. A non-loopback address needs `token_file`, or stormlb refuses to start: whoever reaches the API can point a VIP anywhere. |
+| `token_file` | none | A file holding the bearer token every `/api/v1` request must send (`Authorization: Bearer <token>`). It is re-read on every request, so it can be rotated in place. `/healthz` needs no token. |
+| `state_file` | none | Where VIPs made through the API are saved (JSON, written atomically on every change) and read back at start, so they serve again after a restart before anyone re-applies them. Unset: they live in memory only. |
+
 ### `[vip]`: the L4 balancer (present = enabled)
 
 | Key | Default | Meaning |
 |---|---|---|
-| `address` | required | The VIP, IPv4. VRRP claims it and BGP advertises it. |
+| `address` | required | The VIP. VRRP and BGP need IPv4. |
 | `port` | required | Port the L4 proxy listens on (e.g. `6443`). |
-| `bind` | `"0.0.0.0"` | Address the L4 proxy binds. The wildcard means it accepts whether or not this node currently holds the VIP. |
+| `bind` | `"0.0.0.0"` | Address the L4 proxy binds. The wildcard means it accepts whether or not this node currently holds the VIP. The VIP's own address works too: the listener sets `IP_FREEBIND`, so it binds before the address arrives. |
 
-The next four sections are only read when `[vip]` is present.
+It runs as the VIP named `default`, which the API shows but can't change or
+remove. The next four sections are only read when `[vip]` is present.
 
 ### `[[backend]]`: the pool behind the VIP
 
@@ -100,11 +116,16 @@ With no backends it starts, warns, and drops every connection.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `mode` | `"tcp"` | `tcp`: a connect within the timeout passes. `http` / `https`: `GET <path>` and the status must be in `expect_status`. HTTPS doesn't verify certificates. |
+| `mode` | `"tcp"` | `tcp`: a connect within the timeout passes. `http` / `https`: `GET <path>` and the status must be in `expect_status`. |
 | `path` | `"/readyz"` | A leading `/` is added if missing. |
 | `interval_secs` | `2` (min 1) | Sleep between rounds. Backends are checked one after another within a round. |
 | `timeout_secs` | `2` (min 1) | Per check. |
 | `expect_status` | `[200]` | |
+| `ca_file` | none | For `https`: a PEM CA (or bundle) the backend's certificate must chain to, for the address dialled (an apiserver's: the cluster CA, `/data/stormcert/ca.crt`). Only these CAs are trusted, not the public roots. Unset: any certificate is accepted. A file that can't be read or holds no certificate is refused at start (or by the API). |
+
+Within a round, backends are checked one after another. A change to the
+members or the spec through the API wakes the loop, so a new backend is
+probed at once rather than after an interval.
 
 ### `[vrrp]`: L2 VIP ownership
 
@@ -174,10 +195,81 @@ If the preflight fails (bad ASN, no peers, `router_id` not IPv4), it logs
   ([#13](https://github.com/glennswest/stormlb/issues/13)). A client's
   `Authorization` header is passed through untouched.
 
+### VIP API
+
+`[api]` serves plain HTTP/1.1, one request per connection, JSON both ways.
+stormcluster calls it as the masters of a cluster change (form, join as
+master, promote, demote, split): it `GET`s the VIP to see where it stands,
+then `PUT`s the masters it wants behind it.
+
+| Request | Answer |
+|---|---|
+| `GET /api/v1/vips` | `{"vips": [<vip>, …]}` |
+| `GET /api/v1/vips/{name}` | `<vip>`, or 404 |
+| `PUT /api/v1/vips/{name}` with a spec | 201 created or 200 replaced, with `<vip>` |
+| `DELETE /api/v1/vips/{name}` | 200 `{"deleted": name}`, or 404 |
+| `GET /healthz` | 200 `{"status": "ok"}`, no token needed |
+
+A name is 1–63 of `[a-z0-9-]`. The spec (unknown keys are refused):
+
+```json
+{
+  "address": "192.168.8.50",
+  "port": 7443,
+  "bind": "192.168.8.50",
+  "backends": [{"address": "192.168.8.51", "port": 6443},
+               {"address": "192.168.8.52", "port": 6443}],
+  "health": {"mode": "https", "path": "/readyz", "ca_file": "/data/stormcert/ca.crt",
+             "interval_secs": 2, "timeout_secs": 2, "expect_status": [200]},
+  "vrrp": {"interface": "eth0", "vrid": 51, "priority": 100, "advert_interval_secs": 1}
+}
+```
+
+`address`, `port` and backend `address`/`port` are required. Addresses are
+IP literals, never names. `bind` defaults to `address`. `health` takes the
+`[health]` keys with the same defaults. `vrrp` (IPv4 only) takes the
+`[vrrp]` keys without `enabled`; leave it out when something else puts the
+address on the node. `<vip>` is the spec plus `name` and `status`:
+
+```json
+"status": {"listening": "192.168.8.50:7443", "source": "api", "healthy": 2,
+           "backends": [{"address": "192.168.8.51", "port": 6443, "healthy": true}, …],
+           "vrrp": "master"}
+```
+
+`source` is `api`, or `config` for `default` (the TOML `[vip]`, read-only
+here: a `PUT` or `DELETE` of it is a 409). `vrrp` is `master`, `backup` or
+`stopped`, and is absent without VRRP.
+
+What a `PUT` does to a running VIP:
+
+- **Validated first.** A bad spec is a 400, and a listener that can't bind
+  (in use, or another VIP's) is a 409. Either way the VIP keeps serving as
+  it was.
+- **Backends that stay keep their health,** so re-applying the same masters
+  never takes the VIP down. New ones start unhealthy and are probed at once.
+  A removed one gets no new connections. **Connections already proxied are
+  never cut,** whatever changes.
+- A new `bind`/`port` binds the new listener before the old one closes.
+- A changed `vrrp` or `address` stops the VIP's VRRP instance (releasing the
+  address if it was Master) and starts a new one.
+
+`DELETE` closes the listener and stops VRRP; connections already proxied
+run on. With `state_file`, every change is saved: if the save fails, the
+change is still in effect, and the answer is a 500 that says so.
+
+Errors are `{"error": "…"}`: 400, 401 (no or wrong token), 404, 405, 409,
+411 (chunked body), 413 (body over 1 MiB), 431 (head over 16 KiB), 500.
+
+**On a master, the VIP can't be on 6443.** The apiserver binds
+`0.0.0.0:6443`, and Linux won't bind `<vip>:6443` beside a wildcard
+listener, so the PUT is a 409. Which port the cluster's VIP uses is
+stormcluster's (glennswest/stormcluster#35).
+
 ### L4 balancer
 
-- Accepts on `bind:port` and picks a backend round-robin among the healthy
-  ones. It then splices (TCP_NODELAY both ways).
+- Accepts on `bind:port` (bound with `SO_REUSEADDR` and `IP_FREEBIND`) and
+  picks a backend round-robin among the healthy ones. It then splices (TCP_NODELAY both ways).
 - Backends **start unhealthy**; the first passing check admits them.
 - With no healthy backend, or if the chosen backend refuses the connection,
   the client connection is closed. There is no retry on another backend.
@@ -185,7 +277,10 @@ If the preflight fails (bad ASN, no peers, `router_id` not IPv4), it logs
 ### VRRP (L2)
 
 VRRP v3 (RFC 5798) over a raw `IPPROTO_VRRP` (112) socket joined to
-`224.0.0.18` on `interface`, TTL 255. It runs on its own OS thread.
+`224.0.0.18` on `interface`, TTL 255. Each VIP with VRRP (`[vrrp]` for
+`default`, `vrrp` in an API spec) runs its own instance on its own OS
+thread. An instance stops within half a second when its VIP is removed or
+its VRRP changes, and releases the address if it was Master.
 
 - **Master:** sends an advertisement every interval. A peer with a higher
   priority, or equal priority and a higher address, demotes it to Backup,
@@ -215,7 +310,8 @@ Announce/withdraw latency is up to 60 s today
 | Port | Proto | Who | When |
 |---|---|---|---|
 | `[router] listen`: **80** in the golden | TCP, plain HTTP/1.x, no auth | clients via `*.storm1.<zone>`; stormd's liveness probe on `127.0.0.1:80/healthz` | `[router]` present |
-| `[vip] port`, e.g. 6443 | TCP | kube-api clients via the VIP | `[vip]` present |
+| `[vip] port`, e.g. 6443, and each API VIP's `port` | TCP | kube-api clients via the VIP | `[vip]` present, or a VIP made through the API |
+| `[api] listen`: **127.0.0.1:9103** by default | plain HTTP, JSON; a bearer token with `token_file` | stormcluster, on the same node | `[api]` present |
 | n/a | IP proto 112 to `224.0.0.18` | VRRP peers | `[vrrp] enabled` |
 | 179 (outbound only) | TCP | BGP peers | `[bgp] enabled` |
 | 180 in the golden | plain HTTP, no auth | **stormd's** API, not stormlb's (port + 100, stormcentral's convention). Its TLS and auth are stormd#32. | golden |
@@ -225,9 +321,9 @@ certificate and to authenticate, health probes excepted. stormcos
 `docs/SECURITY.md` lists `:80` as failing that rule until
 [#14](https://github.com/glennswest/stormlb/issues/14) lands.
 
-**Health:** the router's `/healthz` (above) is the only endpoint. The L4
-half has no health endpoint of its own; a node's VIP state is visible in
-the logs and with `ip addr`.
+**Health:** the router's `/healthz` (above), and the API's `/healthz`.
+Each VIP's backends' health and VRRP state are in `GET /api/v1/vips`; a VIP
+from `[vip]` without `[api]` shows them only in the logs (and `ip addr`).
 
 **Metrics:** none. stormlb exports no metrics endpoint: `GET /metrics` on
 `:80` is the 404 for an unclaimed host, or goes to the backend of a
@@ -254,11 +350,15 @@ stormcentral):
   exit, and probes `http://127.0.0.1:80/healthz`. There are also
   `stormlb-data` (64 MiB, `data1`, at `/var/lib/stormlb`) and `stormlb-logs`
   (64 MiB, `system1`, at `/var/log/stormd`).
-- The config baked into the golden is **router only**:
+- The config baked into the golden is the **router and the VIP API**, on
+  loopback, saving its VIPs on the data volume:
 
   ```toml
   [router]
   listen = "auto:80"
+
+  [api]
+  state_file = "/var/lib/stormlb/vips.json"
   ```
 
 - stormcentral builds the golden from an exact pushed commit with
@@ -289,13 +389,18 @@ issue here. `Cargo.lock` is committed, and `cargo update` is a deliberate
 commit of its own. A new golden is requested with
 `stormcentral component build stormlb --url http://stormcentral.g8.lo`.
 
-Tests (25): config parsing and defaults, pool round-robin and health
-filtering, TCP health check, the VRRP state machine and advertisement
+Tests: config parsing and defaults, pool round-robin, health filtering and
+member replacement, TCP health check, CA-file validation, the VRRP state machine and advertisement
 encode/parse/checksum, BGP OPEN/UPDATE/withdraw encoding, router header
-parsing, the router's own `/healthz` bytes on a real socket, and an
-integration test (`tests/balancer.rs`) for round-robin plus failover through
-the real L4 proxy. VRRP and BGP on the wire (raw socket,
-iproute2, a real peer) are not covered by tests.
+parsing, the router's own `/healthz` bytes on a real socket, and two
+integration tests. `tests/balancer.rs` drives round-robin plus failover
+through the real L4 proxy. `tests/vips.rs` drives the VIP API over a real
+socket: create, change backends (new members probed at once, members that
+stay keep their health, a proxied connection survives), move the listener,
+remove, refused changes leaving the VIP serving, the token, a restart from
+`state_file`, the config VIP read-only, and https health against a CA file
+(certificates made with `openssl` at test time; skipped without it). VRRP
+and BGP on the wire (raw socket, iproute2, a real peer) are not covered.
 
 ### Tests on a node: the test container
 
@@ -379,7 +484,15 @@ What the code does not do yet, which older docs implied it did:
   Established or enforce a hold timer.
 - [#7](https://github.com/glennswest/stormlb/issues/7): a VRRP Backup never
   preempts a lower-priority Master, and priority 0 isn't handled. VIP
-  ownership ignores backend health. It relies on `ip` and `arping` binaries.
+  ownership ignores backend health. It relies on `ip` and `arping` binaries,
+  which the golden doesn't carry. Until it lands, an API VIP with `vrrp`
+  can't claim its address in the golden.
+- [stormcluster#35](https://github.com/glennswest/stormcluster/issues/35):
+  a cluster's API VIP can't listen on `:6443` on a master, because the
+  apiserver binds `0.0.0.0:6443` there. The VIP's port is stormcluster's
+  choice.
+- The API is plain HTTP on loopback, with an optional bearer token: no TLS
+  (stormcos#81 allows nothing else off-node, which is why it is loopback).
 - [#12](https://github.com/glennswest/stormlb/issues/12): no metrics
   endpoint (stormcos#64).
 - [#13](https://github.com/glennswest/stormlb/issues/13): the upstream

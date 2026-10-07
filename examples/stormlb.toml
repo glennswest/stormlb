@@ -20,6 +20,7 @@ port = 6443
 [health]
 mode = "https"             # tcp | http | https
 path = "/readyz"
+# ca_file = "/data/stormcert/ca.crt"   # verify https checks; unset = accept any cert
 interval_secs = 2
 timeout_secs = 2
 expect_status = [200]
@@ -43,6 +44,14 @@ router_id = "192.168.8.51"
 # [[bgp.peers]]
 # address = "192.168.8.1"
 # asn = 64512
+
+# The VIP API: named VIPs made and changed at runtime (stormcluster keeps
+# the cluster's API VIP in front of the masters through it). Present =
+# enabled. The [vip] above is the VIP "default", read-only through it.
+# [api]
+# listen = "127.0.0.1:9103"              # off loopback, token_file is required
+# token_file = "/etc/stormlb/api-token"  # Authorization: Bearer <token>
+# state_file = "/var/lib/stormlb/vips.json"
 
 # The L7 Host-header router over HTTPRoutes. Present = enabled; alone, it is a
 # complete config (no [vip] needed).

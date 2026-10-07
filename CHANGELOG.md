@@ -3,6 +3,23 @@
 ## [Unreleased]
 
 ### 2026-10-06
+- **feat:** runtime VIPs and the VIP API (#16). `[api]` (default
+  `127.0.0.1:9103`) serves `GET/PUT/DELETE /api/v1/vips/{name}` and
+  `GET /api/v1/vips`: named VIPs, each with its own listener, backends,
+  health spec and optional VRRP, for stormcluster to keep the cluster's API
+  VIP in front of the masters. A change is validated and any new listener
+  bound before the running VIP is touched; backends that stay keep their
+  health, new ones are probed at once, proxied connections are never cut.
+  `token_file` (bearer, re-read per request) is required off loopback;
+  `state_file` saves API VIPs and serves them again at start. The TOML
+  `[vip]` is the read-only VIP `default`. Listeners bind with `IP_FREEBIND`
+  and `SO_REUSEADDR`; VRRP instances stop cleanly and release the address.
+- **feat:** `health.ca_file`: https checks verify the backend against a PEM
+  CA (the cluster CA for `/readyz`); unset keeps accepting any certificate.
+- **docs:** README (`[api]`, "VIP API", `ca_file`, ports, start-up, gaps),
+  design.md (the runtime VIP), deck, example. Filed stormcluster#35: the VIP
+  can't share `:6443` with a master's apiserver.
+
 - **fix(test):** result lines carry no literal space (compact JSON, `\u0020`
   inside strings). The first runner run (9c56c07cc4, short, C2NR0Q2) passed
   all five checks, but rustkube-node's pod `/log` cut the first three words
