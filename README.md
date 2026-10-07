@@ -430,8 +430,12 @@ state, restarts and crashes.
 
 ## How it ships
 
-stormlb is a stormcentral component (`components/stormcos.toml` in
-stormcentral):
+stormlb is a stormcentral component. Its entry (golden, port, health,
+argv, the config text below) lives in stormcentral's database: read it with
+`stormcentral component export`, change it with `stormcentral component edit
+stormlb --set key=value` (stormcentral#185). stormcentral's
+`components/stormcos.toml` was only the seed, imported once and not read
+again.
 
 - `kind = "service"`: a `stormlb` golden (32 MiB, pallet `system1`) with the
   static musl binary at `/usr/sbin/stormlb` in a stormd base. stormd runs it

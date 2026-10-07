@@ -340,3 +340,8 @@ deliberate commit of its own.
     42 unit + every integration test, bgp 4 runs, clippy/doc, test crate.
     #23 closed. Golden blocked until stormcentral#521: #6 proposed after it.
     Then: `stormcentral component build stormlb`, close #6, shipped.
+- [ ] #15 (P3) docs: the registry entry is stormcentral's database
+      (`component export`/`edit`), not `components/stormcos.toml` (a seed
+      since stormcentral#185); untrack tmp/lb-issue.md, tmp/sc-issue.md
+      (tmp/ is already in .gitignore). Docs only: sc-build on a VM, no
+      golden (nothing in it changes; component build is blocked anyway).

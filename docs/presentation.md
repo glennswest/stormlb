@@ -187,7 +187,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 | Startup order, router-only mode | `src/main.rs` |
 | Router behaviour | `src/router.rs`, `docs/design.md` |
 | L4 / health / VRRP / BGP | `src/balancer.rs`, `src/health.rs`, `src/vrrp.rs`, `src/bgp.rs`, `src/vip.rs` |
-| Golden, port, config | stormcentral `components/stormcos.toml` |
+| Golden, port, config | stormcentral's database: `stormcentral component export` (`component edit` to change; `components/stormcos.toml` was only the seed, stormcentral#185) |
 | Relationships | stormcentral `config/stormcentral.toml` (`stormcentral check`) |
 | boot.d spec and start line | stormcos `deploy/build-goldens.sh` |
 | Why a router here | stormpump `docs/routing.md` |

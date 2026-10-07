@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **docs:** the registry entry is stormcentral's database (`component
+  export`/`edit`), not `components/stormcos.toml`, which is only the seed
+  since stormcentral#185 (#15).
+- **chore:** untracked `tmp/lb-issue.md` and `tmp/sc-issue.md`, issue drafts
+  committed before `tmp/` was ignored (#15).
 - **docs:** builds run on a fresh build VM (`SC_BUILD_VM=1 sc-build`); the
   dev.g8.lo build box was retired.
 - **fix:** BGP follows health at once (#6). Announce and withdraw are driven
