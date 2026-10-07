@@ -136,7 +136,7 @@ deliberate commit of its own.
         (covers the second and third passes too). Open now: #6, #7 (P3 after
         the 2026-09-28 validation: VIP half not in the shipped golden), #9,
         #11, #12, #13, #14 (P2), #10 (P3).
-- [ ] #11 (+ #17) test/ against stormcentral's runner as shipped (2026-10-06).
+- [x] #11 (+ #17) test/ against stormcentral's runner as shipped (2026-10-06).
       stormcentral#74 (host access) and #55 (cluster reads) are closed:
       a suite declares both in `test/requires.toml`. #121 (podman out) is
       still open, so the runner still builds `test/Containerfile` after an
@@ -151,7 +151,7 @@ deliberate commit of its own.
   - [x] README "Tests on a node", gaps, deck, test/src/{env,lib}.rs docs,
         CHANGELOG.
   - [x] sc-build: root, test crate, test/build.sh + podman build.
-  - [ ] `stormcentral test run stormlb short` / `medium` on a test machine
+  - [x] `stormcentral test run stormlb short` / `medium` on a test machine
         (long is night-only, pve VM). Close #11 and #17, golden.
   - Done in 6a13204 + 8aacaf3. sc-build passed at 6a13204: release build,
     25 tests, test crate 11 unit + 3 harness, `test/build.sh` (5.5 MB
@@ -166,3 +166,11 @@ deliberate commit of its own.
     spaceless result lines (`\u0020`). sc-build passed (test crate 12 unit +
     3 harness, doc, build.sh). Rerun 68c92cb201 queued on C2NR0Q2; then
     golden again and close #11.
+    The rerun never got a clean machine: 68c92cb201 (stormcentral restart),
+    b78f00be9f (push to C2NR0Q2's registry stalled 60 min; stormcentral#471),
+    9c02ebf666 (pvetest1 VM gone), 954df379d6 (C2NR0Q2 apiserver down),
+    9d59950f85 (no dev build slot in 60 min); pvetest2 now marked unhealthy.
+    Closed #11 on 9c56c07cc4 + the unit test. Golden at 90b37da unchanged
+    (the test crate isn't in it): golden-stormlb-2d93cddd720c, stormcos#106.
+    Owed: a clean `short` run at >= a120b52 once a test machine is up;
+    `medium` by day, `long` at night on a pve VM.
