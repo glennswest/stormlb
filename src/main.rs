@@ -3,7 +3,6 @@
 use anyhow::Result;
 use clap::Parser;
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use stormlb::vips::{Registry, CONFIG_VIP};
@@ -66,16 +65,18 @@ async fn main() -> Result<()> {
         let vip: Ipv4Addr = v.address.parse().map_err(|_| anyhow::anyhow!("bgp needs vip.address to be IPv4"))?;
         match bgp::preflight(&cfg.bgp) {
             Ok(next_hop) => {
-                let advertise = Arc::new(AtomicBool::new(false));
+                // Health → advertise, every 250 ms: a session announces or
+                // withdraws as soon as this changes (#6).
+                let (tx, rx) = tokio::sync::watch::channel(false);
                 let pool = reg.pool(CONFIG_VIP).expect("the config VIP was started above");
-                let adv = advertise.clone();
                 tokio::spawn(async move {
                     loop {
-                        adv.store(pool.healthy_count() > 0, Ordering::Relaxed);
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        let healthy = pool.healthy_count() > 0;
+                        tx.send_if_modified(|v| std::mem::replace(v, healthy) != healthy);
+                        tokio::time::sleep(Duration::from_millis(250)).await;
                     }
                 });
-                bgp::spawn(&cfg.bgp, vip, next_hop, advertise);
+                bgp::spawn(&cfg.bgp, vip, next_hop, rx);
             }
             Err(e) => warn!("bgp disabled: {e}"),
         }

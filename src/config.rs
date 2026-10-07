@@ -179,7 +179,14 @@ pub struct BgpCfg {
 #[derive(Debug, Deserialize, Clone)]
 pub struct BgpPeer {
     pub address: String,
+    /// The peer's AS; its OPEN must carry it, or the session is refused.
     pub asn: u32,
+    /// The peer's BGP port.
+    #[serde(default = "default_bgp_port")]
+    pub port: u16,
+}
+fn default_bgp_port() -> u16 {
+    179
 }
 
 pub fn load(path: &str) -> anyhow::Result<Config> {

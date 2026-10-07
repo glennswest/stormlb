@@ -6,29 +6,50 @@
 //! the same `/32`, so the upstream router ECMP-hashes flows across them: true
 //! active-active with route-withdraw failover.
 //!
+//! The session follows RFC 4271's FSM as far as a speaker that only originates
+//! one route needs (#6): OPEN sent, the peer's OPEN read and checked (version
+//! 4, its AS as configured, a hold time of 0 or at least 3 s), KEEPALIVE, and
+//! only once the peer's KEEPALIVE arrives (Established) any UPDATE. The hold
+//! time is the smaller of ours and the peer's; keepalives go every third of
+//! it, and a peer silent for a whole hold time gets a Hold Timer Expired
+//! NOTIFICATION and the session is dropped. Announce and withdraw follow
+//! `advertise` as it changes, not on the keepalive tick.
+//!
 //! Scope: 2-byte ASNs (private ASNs < 65536 — the on-prem norm); 4-octet ASN
 //! capability is a follow-up. IPv4 unicast only.
 
 use crate::config::BgpCfg;
 use anyhow::{Context, Result};
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
+use tokio::sync::{mpsc, watch};
+use tokio::time::{timeout, Instant};
 use tracing::{info, warn};
 
-const BGP_PORT: u16 = 179;
 const HOLD_TIME: u16 = 180;
+/// How long to wait for the peer's OPEN (RFC 4271's "large value", 4 min).
+const OPEN_WAIT: Duration = Duration::from_secs(240);
 // Message types.
 const OPEN: u8 = 1;
 const UPDATE: u8 = 2;
+const NOTIFICATION: u8 = 3;
 const KEEPALIVE: u8 = 4;
+// NOTIFICATION codes and subcodes we send.
+const ERR_HEADER: u8 = 1;
+const ERR_OPEN: u8 = 2;
+const ERR_OPEN_VERSION: u8 = 1;
+const ERR_OPEN_PEER_AS: u8 = 2;
+const ERR_OPEN_HOLD: u8 = 6;
+const ERR_HOLD_EXPIRED: u8 = 4;
+const ERR_FSM: u8 = 5;
 
 /// Spawn one session task per configured peer. Each advertises `vip/32` with
-/// next-hop `next_hop` while `advertise` is true.
-pub fn spawn(cfg: &BgpCfg, vip: Ipv4Addr, next_hop: Ipv4Addr, advertise: Arc<AtomicBool>) {
+/// next-hop `next_hop` while `advertise` holds true, and reacts to every
+/// change of it.
+pub fn spawn(cfg: &BgpCfg, vip: Ipv4Addr, next_hop: Ipv4Addr, advertise: watch::Receiver<bool>) {
     let bgp_id: Ipv4Addr = cfg.router_id.parse().unwrap_or(next_hop);
     let local_asn = cfg.local_asn;
     for peer in &cfg.peers {
@@ -36,14 +57,12 @@ pub fn spawn(cfg: &BgpCfg, vip: Ipv4Addr, next_hop: Ipv4Addr, advertise: Arc<Ato
             warn!("bgp: bad peer address {}", peer.address);
             continue;
         };
-        let peer_asn = peer.asn;
-        let advertise = advertise.clone();
+        let p = Peer { ip: peer_ip, port: peer.port, asn: peer.asn };
+        let mut advertise = advertise.clone();
         tokio::spawn(async move {
             loop {
-                if let Err(e) =
-                    session(peer_ip, peer_asn, local_asn, bgp_id, next_hop, vip, &advertise).await
-                {
-                    warn!("bgp: session with {peer_ip} ended: {e}");
+                if let Err(e) = session(&p, local_asn, bgp_id, next_hop, vip, &mut advertise).await {
+                    warn!("bgp: session with {}:{} ended: {e:#}", p.ip, p.port);
                 }
                 tokio::time::sleep(Duration::from_secs(5)).await; // reconnect backoff
             }
@@ -51,59 +70,161 @@ pub fn spawn(cfg: &BgpCfg, vip: Ipv4Addr, next_hop: Ipv4Addr, advertise: Arc<Ato
     }
 }
 
-/// One peering session: OPEN handshake, keepalives, and advertise/withdraw the
-/// VIP as `advertise` changes. Returns Err on any session failure (caller
+struct Peer {
+    ip: Ipv4Addr,
+    port: u16,
+    asn: u32,
+}
+
+/// One message from the peer: (type, body).
+type Msg = (u8, Vec<u8>);
+
+/// Read whole messages off the socket into a channel: the session's select!
+/// then only ever waits on `recv`, which is cancel-safe (a `read_exact` in
+/// select! could lose half a message when another arm fires).
+fn spawn_reader(mut r: tokio::net::tcp::OwnedReadHalf) -> mpsc::Receiver<Result<Msg>> {
+    let (tx, rx) = mpsc::channel(16);
+    tokio::spawn(async move {
+        loop {
+            let m = read_msg(&mut r).await;
+            let end = m.is_err();
+            if tx.send(m).await.is_err() || end {
+                return;
+            }
+        }
+    });
+    rx
+}
+
+async fn read_msg<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Msg> {
+    let mut hdr = [0u8; 19];
+    r.read_exact(&mut hdr).await.context("peer closed")?;
+    anyhow::ensure!(hdr[..16] == [0xff; 16], "bad marker");
+    let len = u16::from_be_bytes([hdr[16], hdr[17]]) as usize;
+    anyhow::ensure!((19..=4096).contains(&len), "bad message length {len}");
+    let mut body = vec![0u8; len - 19];
+    r.read_exact(&mut body).await.context("short read")?;
+    Ok((hdr[18], body))
+}
+
+/// The next message, or an error if the reader ended.
+async fn next(rx: &mut mpsc::Receiver<Result<Msg>>) -> Result<Msg> {
+    rx.recv().await.unwrap_or_else(|| Err(anyhow::anyhow!("peer closed")))
+}
+
+/// Send a NOTIFICATION and fail with `why`.
+async fn notify<T>(w: &mut OwnedWriteHalf, code: u8, sub: u8, why: String) -> Result<T> {
+    let _ = w.write_all(&notification_msg(code, sub)).await;
+    anyhow::bail!(why)
+}
+
+/// Check the peer's OPEN; Ok(its hold time) or the NOTIFICATION (code,
+/// subcode) to send and why.
+fn check_open(body: &[u8], want_asn: u32) -> std::result::Result<u16, (u8, u8, String)> {
+    if body.len() < 10 {
+        return Err((ERR_OPEN, 0, format!("OPEN body of {} bytes", body.len())));
+    }
+    if body[0] != 4 {
+        return Err((ERR_OPEN, ERR_OPEN_VERSION, format!("BGP version {}", body[0])));
+    }
+    let asn = u16::from_be_bytes([body[1], body[2]]) as u32;
+    if asn != want_asn {
+        return Err((ERR_OPEN, ERR_OPEN_PEER_AS, format!("peer AS{asn}, configured AS{want_asn}")));
+    }
+    let hold = u16::from_be_bytes([body[3], body[4]]);
+    if hold == 1 || hold == 2 {
+        return Err((ERR_OPEN, ERR_OPEN_HOLD, format!("hold time {hold} s")));
+    }
+    Ok(hold)
+}
+
+/// One peering session. Returns Err on any session failure (the caller
 /// reconnects).
 async fn session(
-    peer: Ipv4Addr,
-    peer_asn: u32,
+    p: &Peer,
     local_asn: u32,
     bgp_id: Ipv4Addr,
     next_hop: Ipv4Addr,
     vip: Ipv4Addr,
-    advertise: &AtomicBool,
+    advertise: &mut watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut stream = TcpStream::connect((peer, BGP_PORT))
+    let stream = timeout(Duration::from_secs(10), TcpStream::connect((p.ip, p.port)))
         .await
-        .with_context(|| format!("connecting to BGP peer {peer}"))?;
-    info!("bgp: connected to {peer} (AS{peer_asn}); local AS{local_asn}");
+        .map_err(|_| anyhow::anyhow!("connecting to {}:{} timed out", p.ip, p.port))?
+        .with_context(|| format!("connecting to BGP peer {}:{}", p.ip, p.port))?;
+    let (r, mut w) = stream.into_split();
+    let mut rx = spawn_reader(r);
+    info!("bgp: connected to {} (AS{}); local AS{local_asn}", p.ip, p.asn);
+    w.write_all(&open_msg(local_asn as u16, HOLD_TIME, bgp_id)).await?;
 
-    stream.write_all(&open_msg(local_asn as u16, HOLD_TIME, bgp_id)).await?;
-    stream.write_all(&keepalive_msg()).await?;
+    // OpenSent: the peer's OPEN.
+    let (t, body) = match timeout(OPEN_WAIT, next(&mut rx)).await {
+        Ok(m) => m?,
+        Err(_) => return notify(&mut w, ERR_HOLD_EXPIRED, 0, "no OPEN from the peer".into()).await,
+    };
+    match t {
+        OPEN => {}
+        NOTIFICATION => anyhow::bail!("peer sent NOTIFICATION {:?} instead of OPEN", body.get(..2)),
+        _ => return notify(&mut w, ERR_FSM, 0, format!("message type {t} before OPEN")).await,
+    }
+    let peer_hold = match check_open(&body, p.asn) {
+        Ok(h) => h,
+        Err((code, sub, why)) => return notify(&mut w, code, sub, format!("refused the peer's OPEN: {why}")).await,
+    };
+    let hold = HOLD_TIME.min(peer_hold);
+    w.write_all(&keepalive_msg()).await?;
 
-    let keepalive_every = Duration::from_secs((HOLD_TIME / 3).max(1) as u64);
-    let mut ticker = tokio::time::interval(keepalive_every);
+    // OpenConfirm: its KEEPALIVE makes the session Established.
+    let wait = if hold == 0 { OPEN_WAIT } else { Duration::from_secs(hold as u64) };
+    let (t, body) = match timeout(wait, next(&mut rx)).await {
+        Ok(m) => m?,
+        Err(_) => return notify(&mut w, ERR_HOLD_EXPIRED, 0, "no KEEPALIVE after OPEN".into()).await,
+    };
+    match t {
+        KEEPALIVE => {}
+        NOTIFICATION => anyhow::bail!("peer sent NOTIFICATION {:?}", body.get(..2)),
+        _ => return notify(&mut w, ERR_FSM, 0, format!("message type {t} in OpenConfirm")).await,
+    }
+    info!("bgp: session with {} Established (hold {hold} s)", p.ip);
+
+    let hold_d = Duration::from_secs(hold as u64);
+    let far = Duration::from_secs(365 * 24 * 3600);
+    let mut ticker = tokio::time::interval(if hold == 0 { far } else { hold_d / 3 });
+    ticker.tick().await; // the first tick is immediate; the OPEN's KEEPALIVE just went
+    let mut hold_deadline = Instant::now() + if hold == 0 { far } else { hold_d };
     let mut announced = false;
-    let mut hdr = [0u8; 19];
+    // Announce at once if healthy now; from here on, on every change.
+    advertise.mark_changed();
 
     loop {
         tokio::select! {
-            _ = ticker.tick() => {
-                stream.write_all(&keepalive_msg()).await?;
-                // Reconcile advertised state with health.
-                let want = advertise.load(Ordering::Relaxed);
+            _ = ticker.tick() => w.write_all(&keepalive_msg()).await?,
+            _ = tokio::time::sleep_until(hold_deadline) => {
+                return notify(&mut w, ERR_HOLD_EXPIRED, 0, format!("nothing from the peer for {hold} s (hold timer)")).await;
+            }
+            r = advertise.changed() => {
+                r.context("health state gone")?;
+                let want = *advertise.borrow_and_update();
                 if want && !announced {
-                    stream.write_all(&update_announce(local_asn as u16, next_hop, vip, 32)).await?;
+                    w.write_all(&update_announce(local_asn as u16, next_hop, vip, 32)).await?;
                     announced = true;
-                    info!("bgp: advertising {vip}/32 to {peer} (next-hop {next_hop})");
+                    info!("bgp: advertising {vip}/32 to {} (next-hop {next_hop})", p.ip);
                 } else if !want && announced {
-                    stream.write_all(&update_withdraw(vip, 32)).await?;
+                    w.write_all(&update_withdraw(vip, 32)).await?;
                     announced = false;
-                    info!("bgp: withdrew {vip}/32 from {peer}");
+                    info!("bgp: withdrew {vip}/32 from {}", p.ip);
                 }
             }
-            r = stream.read_exact(&mut hdr) => {
-                r.context("bgp: peer closed")?;
-                // Header: 16-byte marker, 2-byte length, 1-byte type.
-                let len = u16::from_be_bytes([hdr[16], hdr[17]]) as usize;
-                let body = len.saturating_sub(19);
-                if body > 0 {
-                    let mut drain = vec![0u8; body];
-                    stream.read_exact(&mut drain).await.context("bgp: short read")?;
+            m = next(&mut rx) => {
+                let (t, body) = m?;
+                if hold != 0 {
+                    hold_deadline = Instant::now() + hold_d;
                 }
-                // We only need to keep the session up; NOTIFICATION (type 3) ends it.
-                if hdr[18] == 3 {
-                    anyhow::bail!("bgp: peer sent NOTIFICATION");
+                match t {
+                    KEEPALIVE | UPDATE => {}
+                    NOTIFICATION => anyhow::bail!("peer sent NOTIFICATION {:?}", body.get(..2)),
+                    OPEN => return notify(&mut w, ERR_FSM, 0, "OPEN while Established".into()).await,
+                    _ => return notify(&mut w, ERR_HEADER, 3, format!("message type {t}")).await,
                 }
             }
         }
@@ -135,6 +256,10 @@ fn open_msg(local_asn: u16, hold: u16, bgp_id: Ipv4Addr) -> Vec<u8> {
 
 fn keepalive_msg() -> Vec<u8> {
     message(KEEPALIVE, &[])
+}
+
+fn notification_msg(code: u8, sub: u8) -> Vec<u8> {
+    message(NOTIFICATION, &[code, sub])
 }
 
 /// Encode `<prefix_len>` + the significant prefix bytes (BGP prefix encoding).
@@ -238,6 +363,23 @@ mod tests {
         assert_eq!(&body[2..2 + wlen], &[32, 192, 168, 8, 50]);
         // No path attributes.
         assert_eq!(u16::from_be_bytes([body[2 + wlen], body[3 + wlen]]), 0);
+    }
+
+    #[test]
+    fn the_peers_open_is_checked() {
+        let open = |ver: u8, asn: u16, hold: u16| {
+            let m = open_msg(asn, hold, Ipv4Addr::new(10, 0, 0, 1));
+            let mut b = m[19..].to_vec();
+            b[0] = ver;
+            b
+        };
+        assert_eq!(check_open(&open(4, 64512, 90), 64512), Ok(90));
+        assert_eq!(check_open(&open(4, 64512, 0), 64512), Ok(0), "0 = no keepalives");
+        assert_eq!(check_open(&open(3, 64512, 90), 64512).unwrap_err().1, ERR_OPEN_VERSION);
+        assert_eq!(check_open(&open(4, 64513, 90), 64512).unwrap_err().1, ERR_OPEN_PEER_AS);
+        assert_eq!(check_open(&open(4, 64512, 2), 64512).unwrap_err().1, ERR_OPEN_HOLD);
+        assert!(check_open(&[4, 0], 64512).is_err());
+        assert_eq!(notification_msg(4, 0)[18..], [NOTIFICATION, 4, 0]);
     }
 
     #[test]
