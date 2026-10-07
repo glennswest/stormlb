@@ -315,4 +315,5 @@ deliberate commit of its own.
     (docs). sc-build at 1b4787a (after an exit-75 retry, dev at capacity):
     release build, 41 unit + every integration test, router_identity 4
     runs, clippy/doc, test crate. #21 widened; stormcos#76 told what the
-    ServiceAccount needs. Golden requested at 1b4787a.
+    ServiceAccount needs. Golden golden-stormlb-b14fc90f2a1d (stormcos#361);
+    #9 and #10 closed, shipped.
