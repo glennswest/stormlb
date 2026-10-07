@@ -15,10 +15,10 @@
 #   6. B's VIP is deleted: B sends priority 0 and releases; A takes over fast.
 #
 # Run (needs a built binary; dev allows unprivileged user namespaces):
-#   cargo build --release --locked && tests/vrrp-netns.sh target/release/stormlb
+#   cargo build --release --locked && tests/vrrp-netns.sh   # or: tests/vrrp-netns.sh <path to stormlb>
 set -euo pipefail
 
-BIN=$(realpath "${1:-target/release/stormlb}")
+BIN=$(realpath "${1:-${CARGO_TARGET_DIR:-target}/release/stormlb}")
 if [ "${STORMLB_IN_NS:-}" != 1 ]; then
     exec env STORMLB_IN_NS=1 unshare -rn "$0" "$BIN"
 fi
