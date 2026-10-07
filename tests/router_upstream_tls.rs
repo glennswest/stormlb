@@ -86,8 +86,10 @@ async fn plain_backend() -> SocketAddr {
     addr
 }
 
-/// Routes: (host, backend, annotations beyond storm.io/backend).
-async fn fake_api(routes: Vec<(&'static str, SocketAddr, Vec<(&'static str, &'static str)>)>) -> String {
+/// A route: (host, backend, annotations beyond storm.io/backend).
+type Route = (&'static str, SocketAddr, Vec<(&'static str, &'static str)>);
+
+async fn fake_api(routes: Vec<Route>) -> String {
     let items: Vec<String> = routes
         .iter()
         .map(|(host, be, extra)| {
