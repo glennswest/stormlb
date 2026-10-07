@@ -320,7 +320,7 @@ deliberate commit of its own.
     runs, clippy/doc, test crate. #21 widened; stormcos#76 told what the
     ServiceAccount needs. Golden golden-stormlb-b14fc90f2a1d (stormcos#361);
     #9 and #10 closed, shipped.
-- [ ] #6 (P3) BGP: reconcile on change, Established first, hold timer.
+- [x] #6 (P3) BGP: reconcile on change, Established first, hold timer.
   - [ ] advertise is a watch channel fed every 250 ms from the pool (not an
         AtomicBool read on the 60 s keepalive tick): announce/withdraw at once.
   - [ ] FSM: OPEN sent → peer OPEN validated (version 4, peer AS = config,
@@ -341,7 +341,8 @@ deliberate commit of its own.
     #23 closed. Golden blocked until stormcentral#521: #6 proposed after it.
     #521 closed 13:27Z; the first `component build` (6ae901601af3, 13:38Z)
     still went to dev.g8.lo (no route): stormcentral's VM-build golden
-    installs ~14:40Z. Retry queued for 14:45Z; then close #6, shipped.
+    installs ~14:40Z. Retry at 14:45Z built golden-stormlb-9d6ff636f7a1
+    (9c294ca, stormcos#361); #6 closed, shipped.
 - [x] #15 (P3) docs: the registry entry is stormcentral's database
       (`component export`/`edit`), not `components/stormcos.toml` (a seed
       since stormcentral#185); untrack tmp/lb-issue.md, tmp/sc-issue.md
