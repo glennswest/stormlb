@@ -160,7 +160,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 ## How it ships and is operated
 
 - **Golden kind:** stormcentral `service`, a 32 MiB `stormlb` golden on pallet `system1`. It holds the static musl `/usr/sbin/stormlb` in a stormd base, plus `stormlb-data` (`/var/lib/stormlb`) and `stormlb-logs` (`/var/log/stormd`).
-- **Baked config:** `[router] listen = "auto:80"` and `[api] state_file = "/var/lib/stormlb/vips.json"` (API on `127.0.0.1:9103`).
+- **Baked config:** `[router] listen = "auto:80"`, `[api] state_file = "/var/lib/stormlb/vips.json"` (API on `127.0.0.1:9103`), and `[metrics] listen = "auto:9104"`.
 - **How it starts:** no systemd; stormpump is PID 1. stormcos `build-goldens.sh` writes a `spec stormlb` stanza into `boot.d/40-services`: a container on the host network profile, sharing UTS. On the **sno** and **bastion** profiles it also writes `start stormlb`. stormd then runs it with `--config /etc/stormlb/stormlb.toml`, restarts it on exit and probes `/healthz`.
 - **How it is updated:** push → `sc-build` on dev.g8.lo → `stormcentral component build stormlb`. That builds an immutable golden from the exact commit (`--release --locked`, musl) and files a stormcos release request. A stormcos release then carries the new golden to nodes.
 

@@ -410,8 +410,8 @@ stormcentral):
   exit, and probes `http://127.0.0.1:80/healthz`. There are also
   `stormlb-data` (64 MiB, `data1`, at `/var/lib/stormlb`) and `stormlb-logs`
   (64 MiB, `system1`, at `/var/log/stormd`).
-- The config baked into the golden is the **router and the VIP API**, on
-  loopback, saving its VIPs on the data volume:
+- The config baked into the golden is the **router, the VIP API** (on
+  loopback, saving its VIPs on the data volume) **and metrics** on `:9104`:
 
   ```toml
   [router]
@@ -419,6 +419,9 @@ stormcentral):
 
   [api]
   state_file = "/var/lib/stormlb/vips.json"
+
+  [metrics]
+  listen = "auto:9104"
   ```
 
 - stormcentral builds the golden from an exact pushed commit with
