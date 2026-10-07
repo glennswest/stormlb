@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### 2026-10-07
+- **feat:** Prometheus `/metrics` (#12, stormcos#64). `[metrics] listen`
+  (default `auto:9104`: the node's address and loopback) serves the text
+  format: `stormlb_router_requests_total{host,code}` (the backend's code or
+  the router's own; `host` is a route's or `unrouted`), the time-to-first-
+  byte histogram, upstream errors by kind, connections total/active by
+  listener, TLS handshake errors, routes and route refreshes, certificate
+  loads; per VIP, connections, no-healthy-backend and connect errors,
+  backend health and VRRP state; `process_*` for stormlb itself (stormd's
+  describe stormd, stormd#33); `stormlb_build_info`. Hand-rolled, no new
+  crate.
+- **refactor:** the router's splice reads the backend's first bytes (status,
+  latency) while the client→backend half copies concurrently, instead of
+  `copy_bidirectional`; an 8 MiB upload to a backend that answers only after
+  the whole body is a test.
+- **docs:** README (`[metrics]`, Metrics reference, ports, gaps), design.md,
+  deck, example.
+
 ### 2026-10-06
 - **feat:** the router terminates TLS (#14). `[router.tls]` (`listen`,
   default `auto:443`; `certs`, PEM pairs; `redirect`, default on;

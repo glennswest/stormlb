@@ -108,7 +108,6 @@ Unit-tested; `tests/balancer.rs` drives round-robin and failover through the rea
 | Router credentials for the apiserver, and a CA file to verify it | **planned**, #9, #10 |
 | TLS on `:443` (`[router.tls]`: SNI, reload, 308 from `:80`) | **done** (#14); not in the golden until stormcos#363 mints and mounts the wildcard |
 | TLS to HTTPS-only backends (stormcos#81) | **planned**, #13 |
-| Prometheus `/metrics` (stormcos#64) | **planned**, #12 |
 | BGP reacting faster than the 60 s keepalive tick, waiting for Established, hold timer | **planned**, #6 |
 | Running the test container on test machines | runner shipped (`stormcentral test run`); `test/requires.toml` declares `host_network` (all suites) and the `nodes` read (`long`), `test/build.sh` builds the binary: **ready, not yet run on a test machine** |
 | 4-octet ASNs, MP-BGP, IPv6 | follow-ups |
@@ -148,12 +147,13 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 | **443** (`[router.tls] listen`) | TLS, then the same demux; not in the golden until stormcos#363 |
 | `[vip] port`, e.g. 6443, and each API VIP's port | kube-api clients via the VIP (not 6443 on a master: stormcluster#35) |
 | **127.0.0.1:9103** (`[api]`) | the VIP API, for stormcluster on the node |
+| **9104** (`[metrics]`) | Prometheus `/metrics`: requests by host and code, latency, upstream errors, connections, reloads, VIP health, `process_*` (#12) |
 | IP proto 112 → `224.0.0.18` | VRRP peers |
 | 179, outbound only | BGP peers |
 | 180 | **stormd's** API in the golden, not stormlb's; plain, no auth (stormd#32) |
 
 - **Health:** the router's `/healthz`, the API's `/healthz`, and each VIP's backends and VRRP state in `GET /api/v1/vips`.
-- **Metrics:** none (#12). The node's ironprom scrapes stormd's `:180`: state and restarts, not the router's memory or fds (stormd#33).
+- **Metrics:** `:9104/metrics` (#12): router requests by host and code, time to first byte, upstream errors, connections, route and certificate reloads, VIP connections and backend health, and the process's own memory, fds and CPU. stormd's `:180` still reports state and restarts.
 
 ---
 
@@ -179,7 +179,6 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 - #9: the router reads anonymously, so it works only on sno and bastion (`--dev-anonymous-admin`)
 - #10: no CA-file key, so the apiserver's certificate is never verified
 - #6: BGP reacts only on the 60 s tick
-- #12: no metrics endpoint
 
 ---
 

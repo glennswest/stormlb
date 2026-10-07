@@ -134,9 +134,16 @@ Choices that follow from the code (`src/router.rs`):
   the wildcard, because stormimds holds `169.254.169.254:80`.
 
 Deliberately not done (yet): wildcard hostnames, path and header matching,
-more than the first rule and backendRef, a 502 for a dead backend, and
-metrics ([#12](https://github.com/glennswest/stormlb/issues/12)); a node's
-ironprom scrapes only stormd's `:180` for stormlb (stormcos#64).
+more than the first rule and backendRef, and a 502 for a dead backend.
+
+**Metrics follow the routing (#12).** The router routes per connection and
+splices after the first head, so it counts the first request of each
+connection. It reads the backend's first bytes on the way, for the status
+and the time to first byte, while the client→backend half keeps copying, so
+an upload is never held behind a response that waits for it. The `host`
+label is a route's hostname or `unrouted`, never the client's Host header,
+so a scanner can't grow the series set. Metrics have their own port
+(`:9104`), because `/metrics` on `:80` is a routable path.
 
 TLS is now a requirement, not an option: stormcos#81 has every node listener
 serve TLS with a stormcert certificate and authenticate. The router

@@ -101,6 +101,14 @@ exists because `0.0.0.0:80` includes `169.254.169.254:80`, which stormimds
 | `token_file` | none | A file holding the bearer token every `/api/v1` request must send (`Authorization: Bearer <token>`). It is re-read on every request, so it can be rotated in place. `/healthz` needs no token. |
 | `state_file` | none | Where VIPs made through the API are saved (JSON, written atomically on every change) and read back at start, so they serve again after a restart before anyone re-applies them. Unset: they live in memory only. |
 
+### `[metrics]`: Prometheus metrics (present = enabled)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `listen` | `"auto:9104"` | Where `GET /metrics` is served (also `GET /healthz`; anything else is a 404, a non-GET a 405). `auto:<port>` binds the node's address and loopback, as for `[router] listen`: the node's ironprom scrapes loopback, and stormcos's `check-metrics.sh` probes from off the node. Plain HTTP, read-only, no token, like the other node metrics listeners. If it can't be bound it is logged and everything else runs. |
+
+The series are in [Metrics](#metrics).
+
 ### `[vip]`: the L4 balancer (present = enabled)
 
 | Key | Default | Meaning |
@@ -341,6 +349,7 @@ Announce/withdraw latency is up to 60 s today
 | `[router] listen`: **80** in the golden | TCP, plain HTTP/1.x, no auth | clients via `*.storm1.<zone>`; stormd's liveness probe on `127.0.0.1:80/healthz` | `[router]` present |
 | `[router.tls] listen`: **443** | TLS 1.2/1.3, then HTTP/1.x | clients via `*.storm1.<zone>` | `[router.tls]` present (not in the golden yet: stormcos#363) |
 | `[vip] port`, e.g. 6443, and each API VIP's `port` | TCP | kube-api clients via the VIP | `[vip]` present, or a VIP made through the API |
+| `[metrics] listen`: **9104** (`auto`: node address and loopback) | plain HTTP, read-only, no token | ironprom on the node; stormcos `check-metrics.sh` | `[metrics]` present |
 | `[api] listen`: **127.0.0.1:9103** by default | plain HTTP, JSON; a bearer token with `token_file` | stormcluster, on the same node | `[api]` present |
 | n/a | IP proto 112 to `224.0.0.18` | VRRP peers | `[vrrp] enabled` |
 | 179 (outbound only) | TCP | BGP peers | `[bgp] enabled` |
@@ -354,23 +363,41 @@ stormcos#363. Until then the golden serves plain `:80` only, which
 stormcos `docs/SECURITY.md` lists as failing the rule. A routed host's own
 authentication is its backend's.
 
-**Health:** the router's `/healthz` (above), and the API's `/healthz`.
+**Health:** the router's `/healthz` (above), the API's `/healthz`, and the
+metrics listener's `/healthz`.
 Each VIP's backends' health and VRRP state are in `GET /api/v1/vips`; a VIP
 from `[vip]` without `[api]` shows them only in the logs (and `ip addr`).
 
-**Metrics:** none. stormlb exports no metrics endpoint: `GET /metrics` on
-`:80` is the 404 for an unclaimed host, or goes to the backend of a
-claimed one.
-stormd's API reports the process's restarts and liveness failures. Prometheus
-metrics (requests by host and code, latency, upstream errors, connections)
-are [#12](https://github.com/glennswest/stormlb/issues/12), for stormcos#64.
+### Metrics
 
-What a node collects today (stormcos#64): its ironprom scrapes stormd's
-`/metrics` on `127.0.0.1:180`, so stormlb's process state, restarts and
-crashes are recorded. The router's memory, CPU and open file descriptors are
-not: stormd's `process_*` series describe stormd itself (stormd#33).
-stormcos `docs/METRICS.md` lists the router's own metrics as missing (a 404
-on `:80`), and its scrape config adds a stormlb target once #12 names a port.
+`[metrics]` serves Prometheus text (format 0.0.4) on `:9104/metrics` (#12,
+for stormcos#64). `GET /metrics` on `:80` is still routing: the 404 for an
+unclaimed host, or the backend of a claimed one. Only series that have
+happened are printed.
+
+| Series | Type | Labels | What |
+|---|---|---|---|
+| `stormlb_router_requests_total` | counter | `host`, `code` | Requests: the first of each connection, which is what the router routes. `host` is a route's hostname, or `unrouted` for the router's own answers (a client's Host header never becomes a label). `code` is the backend's status, the router's own (`400`, `404`, `308`, `200` for `/healthz`), or `error` when the backend gave no response. |
+| `stormlb_router_request_duration_seconds` | histogram | `host` | From the request reaching the backend to its first response byte. Buckets 5 ms to 10 s. |
+| `stormlb_router_upstream_errors_total` | counter | `host`, `kind` | `connect` (refused, unreachable) or `no_response` (closed before a byte). |
+| `stormlb_router_connections_total`, `stormlb_router_connections_active` | counter, gauge | `listener` (`http`, `https`) | Connections accepted, and open now. |
+| `stormlb_router_tls_handshake_errors_total` | counter | | Failed or timed-out TLS handshakes. |
+| `stormlb_router_routes` | gauge | | Hostnames in the route table. |
+| `stormlb_router_route_refreshes_total` | counter | `result` (`ok`, `error`) | Route-table reloads from the apiserver. |
+| `stormlb_router_tls_certificates_loaded`, `stormlb_router_tls_reloads_total` | gauge, counter | `result` | Certificate pairs loaded, and (re)loads from changed files. |
+| `stormlb_vip_connections_total`, `stormlb_vip_connections_active` | counter, gauge | `vip` | Connections through each VIP's L4 listener. |
+| `stormlb_vip_no_healthy_backend_total`, `stormlb_vip_upstream_connect_errors_total` | counter | `vip` | Connections dropped: no healthy backend, or the chosen one failed. |
+| `stormlb_vip_backend_healthy` | gauge | `vip`, `backend` | 1 or 0, read at scrape time. |
+| `stormlb_vip_vrrp_master` | gauge | `vip` | 1 while this node is Master (absent without VRRP). |
+| `process_resident_memory_bytes`, `process_open_fds`, `process_max_fds`, `process_cpu_seconds_total`, `process_start_time_seconds` | gauge, counter | | stormlb's own process, from `/proc/self`. stormd's `:180/metrics` describes stormd, not the process it supervises (stormd#33). |
+| `stormlb_build_info` | gauge | `version` | Always 1. |
+
+**Per connection, not per request:** a keep-alive connection's later
+requests are spliced, not parsed, so they aren't counted. That's the price
+of routing per connection (see [Router](#router)).
+
+stormd's own `/metrics` on `127.0.0.1:180` still reports the process's
+state, restarts and crashes.
 
 ## How it ships
 
@@ -511,9 +538,11 @@ makes the Job.
   `bastion` profiles only. When neither the router nor its stormd answers, a suite reports one
   `stormlb-started` skip, never a pass. If stormd answers and the router
   doesn't, that's a failure.
-- **Not observable yet:** the router's own memory and file descriptors.
-  stormd's open `/metrics` reports stormd's, not the process it supervises
-  (stormd#33).
+- **Not read by the suites yet:** the router's own memory and file
+  descriptors. stormd's open `/metrics` reports stormd's, not the process it
+  supervises (stormd#33). Since #12 the router reports its own `process_*`
+  on `:9104/metrics`, but the long suite's residue check doesn't read them
+  yet.
 - **The harness:** `test/tests/harness.rs` runs the three suites against the
   real router (`stormlb::router::run`) and a small in-memory apiserver, all
   on loopback. That's how the container's own code is tested:
@@ -544,8 +573,8 @@ What the code does not do yet, which older docs implied it did:
   choice.
 - The API is plain HTTP on loopback, with an optional bearer token: no TLS
   (stormcos#81 allows nothing else off-node, which is why it is loopback).
-- [#12](https://github.com/glennswest/stormlb/issues/12): no metrics
-  endpoint (stormcos#64).
+- Metrics count the first request of each keep-alive connection only (the
+  router splices after the first head).
 - [#13](https://github.com/glennswest/stormlb/issues/13): the upstream
   connection is always plaintext, so an HTTPS-only backend can't be routed.
 - [stormcos#363](https://github.com/glennswest/stormcos/issues/363): the
