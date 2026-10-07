@@ -260,19 +260,25 @@ deliberate commit of its own.
     [router.tls]. Filed stormcos#363 (mint *.storm1.<zone>, mount it);
     the golden's config enables [router.tls] after that: stormlb#21, proposed
     after stormcos#363. Golden golden-stormlb-509b43a7c597 (stormcos#361).
-- [ ] #12 (P2) Prometheus /metrics (stormcos#64).
-  - [ ] `[metrics] listen` (default `auto:9104`: node address + loopback,
+- [x] #12 (P2) Prometheus /metrics (stormcos#64).
+  - [x] `[metrics] listen` (default `auto:9104`: node address + loopback,
         since ironprom scrapes loopback and check-metrics.sh probes off the
         node). Plain, read-only, like cilium's and the other node metrics.
-  - [ ] `src/metrics.rs`: hand-rolled counters/gauges/histograms, text
+  - [x] `src/metrics.rs`: hand-rolled counters/gauges/histograms, text
         format 0.0.4, no new crate.
-  - [ ] Router: requests{host,code} (host = a route's, else "unrouted";
+  - [x] Router: requests{host,code} (host = a route's, else "unrouted";
         per connection's first request, as routing is), TTFB histogram,
         upstream errors{kind}, connections active/total{listener}, TLS
         handshake errors, route refreshes{result}, routes, TLS certs/reloads.
         Upstream status read from its first bytes while client→upstream
         copies concurrently (no deadlock on uploads).
-  - [ ] VIPs: connections active/total, no-healthy-backend, connect errors,
+  - [x] VIPs: connections active/total, no-healthy-backend, connect errors,
         backend health and VRRP state at scrape time; build_info.
-  - [ ] Tests (unit render; router + scrape end to end), docs, CHANGELOG,
+  - [x] Tests (unit render; router + scrape end to end), docs, CHANGELOG,
         tell stormcos the port, registry config gains [metrics]; golden.
+  - Done in d20b7f8 (code), 3c6072a (process_*), bfa7490 (test baseline),
+    20f49da/1d84d15 (docs). sc-build at bfa7490: release build, 40 unit
+    tests, every integration test (metrics, router_tls, vips 3 runs each),
+    clippy and cargo doc -D warnings, test crate. Registry config now has
+    [metrics] listen = "auto:9104". Golden golden-stormlb-7c9f586ffc88
+    (stormcos#361). Told stormcos the port: stormcos#367.
