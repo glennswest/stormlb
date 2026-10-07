@@ -6,7 +6,10 @@ location. Current: 0.1.0.
 
 ## Build
 
-No cargo on the session VM: build/test with `sc-build` after pushing.
+No cargo on the session VM: build/test with `sc-build` after pushing. It
+runs on a fresh build VM; dev.g8.lo was retired on 2026-10-07. Until the new
+stormcentral golden makes VMs the default, use `SC_BUILD_VM=1 sc-build …`.
+`component build` is blocked until stormcentral#521.
 Goldens build with `cargo build --release --locked`, so `Cargo.lock` is
 committed and must stay in sync with `Cargo.toml`. `cargo update` is a
 deliberate commit of its own.

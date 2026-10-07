@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **docs:** builds run on a fresh build VM (`SC_BUILD_VM=1 sc-build`); the
+  dev.g8.lo build box was retired.
 - **fix:** BGP follows health at once (#6). Announce and withdraw are driven
   by a health watch checked every 250 ms, not the 60 s keepalive tick, and
   the session announces on Established. The session now waits for the

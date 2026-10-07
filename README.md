@@ -454,8 +454,8 @@ stormcentral):
   ```
 
 - stormcentral builds the golden from an exact pushed commit with
-  `cargo build --release --locked --target x86_64-unknown-linux-musl` on
-  `dev.g8.lo`, as an unprivileged build user. That's why `Cargo.lock` is
+  `cargo build --release --locked --target x86_64-unknown-linux-musl` on a
+  build machine, as an unprivileged build user. That's why `Cargo.lock` is
   committed.
 - On a stormcos node there is no systemd: stormpump is PID 1. stormcos's
   `deploy/build-goldens.sh` writes a `spec stormlb` stanza into
@@ -471,12 +471,13 @@ stormcentral):
 Nothing builds on the session VM, and nothing needs root. Push, then:
 
 ```
-sc-build                                        # cargo build && cargo test on dev.g8.lo
+sc-build                                        # cargo build && cargo test on a build VM
 sc-build 'cargo build --release --locked && cargo test --locked'
 ```
 
-`sc-build` fetches the pushed commit into a scratch directory on `dev.g8.lo`
-as `stormbuild`, builds it and deletes it. A failure files a `build-failure`
+`sc-build` fetches the pushed commit onto a fresh build VM, builds it there
+and deletes it (`SC_BUILD_VM=1` forces the VM until stormcentral switches to
+it by default; the old build box, `dev.g8.lo`, was retired on 2026-10-07). A failure files a `build-failure`
 issue here. `Cargo.lock` is committed, and `cargo update` is a deliberate
 commit of its own. A new golden is requested with
 `stormcentral component build stormlb --url http://stormcentral.g8.lo`.
