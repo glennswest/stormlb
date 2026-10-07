@@ -258,4 +258,5 @@ deliberate commit of its own.
     run failed long wave-3 ("closed with no response") on a loaded box; not
     reproduced in 3 reruns, and the plain path is unchanged without
     [router.tls]. Filed stormcos#363 (mint *.storm1.<zone>, mount it);
-    the golden's config enables [router.tls] after that.
+    the golden's config enables [router.tls] after that: stormlb#21, proposed
+    after stormcos#363. Golden golden-stormlb-509b43a7c597 (stormcos#361).
