@@ -166,7 +166,7 @@ fn handle(method: &str, path: &str, query: &str, body: Value, store: &Store) -> 
 async fn stand_up(suite: &str, timeout: Duration) -> Env {
     let api = apiserver().await;
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let cfg = RouterCfg { listen: format!("127.0.0.1:{port}"), apiserver: api.clone(), poll_secs: 1, insecure: true };
+    let cfg = RouterCfg { listen: format!("127.0.0.1:{port}"), apiserver: api.clone(), poll_secs: 1, insecure: true, tls: None };
     tokio::spawn(async move {
         if let Err(e) = router::run(cfg).await {
             panic!("router: {e}");

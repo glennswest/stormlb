@@ -22,6 +22,12 @@
 //! watch bugs. The poll keeps serving the last good table on error, because
 //! a flapping apiserver must not take working routes down with it.
 //!
+//! **TLS** (`[router.tls]`, #14): a second listener terminates TLS with the
+//! configured certificates (picked by SNI, [`crate::tls`]) and feeds the same
+//! demux, adding `X-Forwarded-Proto: https`. Once a certificate is loaded,
+//! plain HTTP answers with a 308 to https, except `/healthz`. The upstream
+//! connection is plain either way (TLS to backends is #13).
+//!
 //! Backends resolve two ways, in order:
 //! - the `storm.io/backend` annotation, `host:port` verbatim. This is how a
 //!   *node* service routes — `127.0.0.1:9094` means "this node's console"
@@ -35,10 +41,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
+use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
+
+use crate::tls::{self, TlsCfg};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RouterCfg {
@@ -59,6 +68,9 @@ pub struct RouterCfg {
     /// (stormlb#10).
     #[serde(default = "default_insecure")]
     pub insecure: bool,
+    /// `[router.tls]`: terminate TLS too. Absent: plain HTTP only.
+    #[serde(default)]
+    pub tls: Option<TlsCfg>,
 }
 
 /// The addresses `auto` resolves to: this node's, minus the ones that belong
@@ -112,6 +124,51 @@ type Table = Arc<RwLock<HashMap<String, String>>>;
 
 pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
     let table: Table = Arc::new(RwLock::new(HashMap::new()));
+    let mut plain = bind_listeners(&cfg.listen).await?;
+    info!(listen = %cfg.listen, apiserver = %cfg.apiserver, "router up");
+
+    tokio::spawn(poll_routes(cfg.clone(), table.clone()));
+
+    let mut redirect = None;
+    if let Some(t) = &cfg.tls {
+        let certs = tls::Certs::new(t.certs.clone());
+        if t.certs.is_empty() {
+            warn!("[router.tls] lists no certs: the TLS listener completes no handshake");
+        } else if certs.count() == 0 {
+            warn!("[router.tls]: no certificate loads yet; checking again every {} s", t.reload_secs.max(1));
+        }
+        tokio::spawn(certs.clone().reload_every(t.reload_secs));
+        // A TLS port that can't be bound is logged, not fatal: crash-looping
+        // would take the plain listener (and the health probe) down with it.
+        match bind_listeners(&t.listen).await {
+            Ok(ls) => {
+                let acceptor = TlsAcceptor::from(tls::server_config(certs.clone()));
+                let front = Front { table: table.clone(), redirect: None };
+                for l in ls {
+                    tokio::spawn(serve_tls_on(l, front.clone(), acceptor.clone()));
+                }
+                info!(listen = %t.listen, loaded = certs.count(), "router TLS up");
+                if t.redirect {
+                    let port = t.listen.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(443);
+                    redirect = Some(Arc::new(Redirect { certs, port }));
+                }
+            }
+            Err(e) => warn!("[router.tls] listen {}: {e:#} — serving plain HTTP only", t.listen),
+        }
+    }
+
+    let front = Front { table, redirect };
+    let first = plain.remove(0);
+    // Everything after the first is served by its own task over the same
+    // routes.
+    for extra in plain {
+        tokio::spawn(serve_on(extra, front.clone()));
+    }
+    serve_on(first, front).await
+}
+
+/// Bind `listen`: `auto:<port>` or `ip:port`.
+async fn bind_listeners(listen: &str) -> anyhow::Result<Vec<TcpListener>> {
     // `auto` means every address except the ones that are not ours to take.
     //
     // The wildcard includes 169.254.169.254, which the instance metadata
@@ -123,12 +180,11 @@ pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
     // So the router binds the node's own routable addresses rather than
     // everything. Resolved here rather than configured, because the address
     // is not known when the golden is built.
-    let listener = match bind_addrs(&cfg.listen) {
+    match bind_addrs(listen) {
         Some(addrs) => {
-            // The first that binds is the one served; the rest are spawned
-            // beside it. A router on its routable address and not on
-            // loopback passes no health check, and one on loopback alone
-            // serves nobody — it needs both.
+            // A router on its routable address and not on loopback passes no
+            // health check, and one on loopback alone serves nobody — it
+            // needs both.
             let mut listeners = Vec::new();
             let mut last = None;
             for a in &addrs {
@@ -140,32 +196,67 @@ pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
             if listeners.is_empty() {
                 return Err(last.expect("at least one address was tried").into());
             }
-            // Everything after the first is served by its own task over the
-            // same routes.
-            for extra in listeners.drain(1..) {
-                let routes = table.clone();
-                tokio::spawn(async move { serve_on(extra, routes).await });
-            }
-            listeners.remove(0)
+            Ok(listeners)
         }
         // `auto` that could not be resolved falls back to the wildcard, not
         // to the literal string. Binding "auto:80" is a DNS lookup of a word,
         // and the error names resolution rather than the placeholder.
-        None if cfg.listen.starts_with("auto") => {
-            let port = cfg.listen.rsplit(':').next().unwrap_or("80");
+        None if listen.starts_with("auto") => {
+            let port = listen.rsplit(':').next().unwrap_or("80");
             tracing::warn!(
                 "could not determine this node's address; binding 0.0.0.0:{port}. \
                  If a metadata service holds 169.254.169.254:{port} this will fail."
             );
-            TcpListener::bind(format!("0.0.0.0:{port}")).await?
+            Ok(vec![TcpListener::bind(format!("0.0.0.0:{port}")).await?])
         }
-        None => TcpListener::bind(&cfg.listen).await?,
-    };
-    info!(listen = %cfg.listen, apiserver = %cfg.apiserver, "router up");
+        None => Ok(vec![TcpListener::bind(listen).await?]),
+    }
+}
 
-    tokio::spawn(poll_routes(cfg.clone(), table.clone()));
+/// What a listener serves: the routes, and on plain HTTP, whether to send
+/// clients to https.
+#[derive(Clone)]
+struct Front {
+    table: Table,
+    redirect: Option<Arc<Redirect>>,
+}
 
-    serve_on(listener, table).await
+impl Front {
+    /// Plain HTTP, no redirect.
+    #[cfg(test)]
+    fn plain(table: Table) -> Front {
+        Front { table, redirect: None }
+    }
+}
+
+/// Redirect plain HTTP to https on `port` — while a certificate is loaded.
+struct Redirect {
+    certs: Arc<tls::Certs>,
+    port: u16,
+}
+
+/// Accept TLS, then demux.
+async fn serve_tls_on(listener: TcpListener, front: Front, acceptor: TlsAcceptor) {
+    loop {
+        let (conn, peer) = match listener.accept().await {
+            Ok(x) => x,
+            Err(e) => {
+                warn!("router TLS accept: {e}");
+                continue;
+            }
+        };
+        let (front, acceptor) = (front.clone(), acceptor.clone());
+        tokio::spawn(async move {
+            let tls = match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(conn)).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => return tracing::debug!(%peer, "TLS handshake failed: {e}"),
+                Err(_) => return tracing::debug!(%peer, "TLS handshake timed out"),
+            };
+            if let Err(e) = serve_conn(tls, &front, true).await {
+                tracing::debug!(%peer, "connection ended: {e}");
+            }
+        });
+    }
 }
 
 /// Accept and demux, on one listener.
@@ -173,12 +264,12 @@ pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
 /// Factored out because the router listens on more than one address: its own,
 /// which clients reach, and loopback, which the health probe dials. One
 /// routing table, several front doors.
-async fn serve_on(listener: TcpListener, table: Table) -> anyhow::Result<()> {
+async fn serve_on(listener: TcpListener, front: Front) -> anyhow::Result<()> {
     loop {
         let (conn, peer) = listener.accept().await?;
-        let table = table.clone();
+        let front = front.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve_conn(conn, &table).await {
+            if let Err(e) = serve_conn(conn, &front, false).await {
                 // One line per failed connection, not per byte: the common
                 // errors here are a client that went away and a backend that
                 // is down, and both are ordinary.
@@ -188,8 +279,9 @@ async fn serve_on(listener: TcpListener, table: Table) -> anyhow::Result<()> {
     }
 }
 
-/// Read one request head, demux on Host, splice.
-async fn serve_conn(mut conn: TcpStream, table: &Table) -> anyhow::Result<()> {
+/// Read one request head, demux on Host, splice. `tls`: the client came in
+/// over TLS (the head gets `X-Forwarded-Proto: https`).
+async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(mut conn: S, front: &Front, tls: bool) -> anyhow::Result<()> {
     // 16 KiB is far past any sane request head; a head that big without a
     // blank line is not HTTP and gets cut off rather than buffered forever.
     let mut head = Vec::with_capacity(1024);
@@ -218,7 +310,21 @@ async fn serve_conn(mut conn: TcpStream, table: &Table) -> anyhow::Result<()> {
         }
     };
 
-    let backend = { table.read().await.get(&host).cloned() };
+    // Plain HTTP goes to https once there is a certificate to serve it with,
+    // except the health probe, which stays on plain HTTP.
+    if let Some(r) = front.redirect.as_ref().filter(|r| !tls && r.certs.count() > 0) {
+        if request_path(&head[..end]) != Some("/healthz") {
+            let port = if r.port == 443 { String::new() } else { format!(":{}", r.port) };
+            let target = request_target(&head[..end]).unwrap_or("/");
+            let resp = format!(
+                "HTTP/1.1 308 Permanent Redirect\r\nlocation: https://{host}{port}{target}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            );
+            let _ = conn.write_all(resp.as_bytes()).await;
+            return Ok(());
+        }
+    }
+
+    let backend = { front.table.read().await.get(&host).cloned() };
     // The router's own liveness, on any host no route claims: stormd probes
     // http://127.0.0.1/healthz, and 127.0.0.1 is never a route's hostname.
     // A host a route *does* claim proxies /healthz to its backend untouched.
@@ -249,7 +355,11 @@ async fn serve_conn(mut conn: TcpStream, table: &Table) -> anyhow::Result<()> {
     let mut upstream = TcpStream::connect(&backend).await.map_err(|e| {
         anyhow::anyhow!("backend {backend} for {host}: {e}")
     })?;
-    upstream.write_all(&head).await?;
+    if tls {
+        upstream.write_all(&forwarded_https(&head, end)).await?;
+    } else {
+        upstream.write_all(&head).await?;
+    }
     tokio::io::copy_bidirectional(&mut conn, &mut upstream).await?;
     Ok(())
 }
@@ -260,6 +370,33 @@ fn request_path(head: &[u8]) -> Option<&str> {
     let line = std::str::from_utf8(line).ok()?;
     let path = line.split_whitespace().nth(1)?;
     Some(path.split('?').next().unwrap_or(path))
+}
+
+/// The request target (path and query), from the request line.
+fn request_target(head: &[u8]) -> Option<&str> {
+    let line = head.split(|&b| b == b'\n').next()?;
+    std::str::from_utf8(line).ok()?.split_whitespace().nth(1).filter(|t| t.starts_with('/'))
+}
+
+/// The head with `X-Forwarded-Proto: https` after the request line, and any
+/// the client sent dropped (it must not claim a scheme it did not use), plus
+/// whatever followed the head (`head[end..]`) unchanged.
+fn forwarded_https(head: &[u8], end: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(head.len() + 32);
+    let mut lines = head[..end].split_inclusive(|&b| b == b'\n');
+    if let Some(first) = lines.next() {
+        out.extend_from_slice(first);
+    }
+    out.extend_from_slice(b"X-Forwarded-Proto: https\r\n");
+    for l in lines {
+        let name = l.split(|&b| b == b':').next().unwrap_or(&[]);
+        if name.eq_ignore_ascii_case(b"x-forwarded-proto") {
+            continue;
+        }
+        out.extend_from_slice(l);
+    }
+    out.extend_from_slice(&head[end..]);
+    out
 }
 
 fn find_head_end(buf: &[u8]) -> Option<usize> {
@@ -392,7 +529,7 @@ mod tests {
     async fn healthz_on_an_unclaimed_host_is_crlf_on_the_wire() {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
-        tokio::spawn(serve_on(l, Arc::new(RwLock::new(HashMap::new()))));
+        tokio::spawn(serve_on(l, Front::plain(Arc::new(RwLock::new(HashMap::new())))));
         let mut c = TcpStream::connect(addr).await.unwrap();
         c.write_all(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").await.unwrap();
         let mut got = Vec::new();
@@ -401,6 +538,20 @@ mod tests {
             String::from_utf8(got).unwrap(),
             "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 13\r\nconnection: close\r\n\r\nrouter alive\n"
         );
+    }
+
+    #[test]
+    fn the_request_target_keeps_the_query() {
+        assert_eq!(request_target(b"GET /a/b?c=1 HTTP/1.1\r\n\r\n"), Some("/a/b?c=1"));
+        assert_eq!(request_target(b"CONNECT x:443 HTTP/1.1\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn tls_requests_say_https_and_a_clients_claim_is_dropped() {
+        let head = b"GET / HTTP/1.1\r\nHost: a\r\nx-forwarded-proto: http\r\nAccept: */*\r\n\r\nBODY";
+        let end = find_head_end(head).unwrap();
+        let out = String::from_utf8(forwarded_https(head, end)).unwrap();
+        assert_eq!(out, "GET / HTTP/1.1\r\nX-Forwarded-Proto: https\r\nHost: a\r\nAccept: */*\r\n\r\nBODY");
     }
 
     #[test]
