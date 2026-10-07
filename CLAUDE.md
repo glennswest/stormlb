@@ -208,20 +208,30 @@ deliberate commit of its own.
     now ships `[api] state_file = "/var/lib/stormlb/vips.json"` beside the
     router. stormcluster's client is its #10. Golden
     golden-stormlb-12f8f607164a at 4f48304 (stormcos#361); #16 closed, shipped.
-- [ ] #7 (P1, needed by #16's VIPs moving between masters) VRRP per RFC 5798
+- [x] #7 (P1, needed by #16's VIPs moving between masters) VRRP per RFC 5798
       and no binaries:
-  - [ ] State machine made pure (actions out, loop executes) so every rule
+  - [x] State machine made pure (actions out, loop executes) so every rule
         is unit-tested: Backup preempt (§6.4.2, `preempt` key, default true:
         a lower-priority advert is discarded so the timer expires), learn
         the Master's advert interval, priority 0 → Skew_Time, Master sends
         priority 0 when it stops.
-  - [ ] Ownership follows health: no healthy backend → a Master resigns
+  - [x] Ownership follows health: no healthy backend → a Master resigns
         (priority 0, release, Backup) and a Backup never takes over; health
         back → normal. The owner (255) starts Backup while unhealthy.
-  - [ ] Wire fixes: checksum over the IPv4 pseudo-header, TTL 255 checked.
-  - [ ] `src/vip.rs`: netlink (RTM_GETLINK/GETADDR/NEWADDR/DELADDR) and a
+  - [x] Wire fixes: checksum over the IPv4 pseudo-header, TTL 255 checked.
+  - [x] `src/vip.rs`: netlink (RTM_GETLINK/GETADDR/NEWADDR/DELADDR) and a
         gratuitous ARP on an AF_PACKET socket, replacing `ip`/`arping`;
         `interface_ipv4` by netlink. `libc` as a direct dependency (already
         locked). Unprivileged tests on dev: `lo` lookup, encodings.
-  - [ ] Docs (README VRRP, keys, gaps; design; deck; example), CHANGELOG.
-  - [ ] sc-build, golden, close #7.
+  - [x] Docs (README VRRP, keys, gaps; design; deck; example), CHANGELOG.
+  - [x] sc-build, golden, close #7.
+  - Done in 9dd3519 (code), 006691f/563e498 (docs), 49e438b..aeda9a5 (wire
+    test), 11a62d3 (test/Cargo.lock). sc-build at 563e498: release build,
+    36 unit + 1 + 8 tests (netlink `lo` lookup on the real kernel), clippy
+    and cargo doc -D warnings, tests/vrrp-netns.sh passed 3 times (two
+    stormlb in two netns on a veth under `unshare -rn`: takeover 3.6 s,
+    preempt 3.2 s, GARP seen in the peer's neighbour table, health resign
+    ~1.1 s, priority-0 handover ~1.1 s). Test crate at 11a62d3. Build-failure
+    issues #18-#20 from the test's first runs closed. Golden
+    golden-stormlb-6301ae09b254 (stormcos#361).
+    Not checked: whether stormd gives the golden CAP_NET_ADMIN/CAP_NET_RAW.
