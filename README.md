@@ -528,5 +528,6 @@ What the code does not do yet, which older docs implied it did:
 - [#14](https://github.com/glennswest/stormlb/issues/14): the router listens
   only on plain `:80`; no TLS termination (stormcos#81).
 - Earlier follow-ups: 4-octet ASNs and multiprotocol BGP. VRRP over IPv6
-  is not implemented. Whether stormd grants the golden `CAP_NET_ADMIN` and
-  `CAP_NET_RAW` hasn't been checked on a node.
+  is not implemented. VRRP's `CAP_NET_ADMIN` and `CAP_NET_RAW` come from
+  stormpump keeping every capability for a container today. Once stormpump#47
+  sets a default, stormlb's spec must ask for both.

@@ -234,4 +234,5 @@ deliberate commit of its own.
     ~1.1 s, priority-0 handover ~1.1 s). Test crate at 11a62d3. Build-failure
     issues #18-#20 from the test's first runs closed. Golden
     golden-stormlb-6301ae09b254 (stormcos#361).
-    Not checked: whether stormd gives the golden CAP_NET_ADMIN/CAP_NET_RAW.
+    Capabilities: stormpump keeps all for a container today; noted on
+    stormpump#47 that stormlb needs NET_ADMIN + NET_RAW once it sets a default.
