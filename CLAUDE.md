@@ -299,15 +299,20 @@ deliberate commit of its own.
       e468486 (41 unit + every integration test, upstream TLS 4 runs,
       clippy/doc, test crate). Golden golden-stormlb-9786a3ef39f1
       (stormcos#361); #13 closed, #22 (clippy build-failure) closed.
-- [ ] #9 (P2) the router's identity, + #10 (its CA). Owner (stormcos#203,
+- [x] #9 (P2) the router's identity, + #10 (its CA). Owner (stormcos#203,
       2026-10-01): stormlb gets its own ServiceAccount; stormcos mints the
       token and RBAC (stormcos#76 step 2); stormlb needs token_file + CA.
-  - [ ] `[router] token_file` (Bearer, re-read each poll), `ca_file`
+  - [x] `[router] token_file` (Bearer, re-read each poll), `ca_file`
         (verify the apiserver against it only; `insecure` then ignored).
         Client rebuilt when the CA changes or first loads.
-  - [ ] 401/403 logged once with what to fix; no token: anonymous as today.
-  - [ ] Tests: fake TLS apiserver demanding a token, CA from openssl; no
+  - [x] 401/403 logged once with what to fix; no token: anonymous as today.
+  - [x] Tests: fake TLS apiserver demanding a token, CA from openssl; no
         token → refused, empty table; token → routes; rotation; wrong CA.
-  - [ ] Docs, CHANGELOG; #21 widened (token_file, ca_file, backend_ca_file,
+  - [x] Docs, CHANGELOG; #21 widened (token_file, ca_file, backend_ca_file,
         router TLS all wait on /data/stormcert + the token, stormcos#363/#76);
         sc-build, golden, close #9 and #10.
+  - Done in 3773c0b (code), 4aeaa5b
+    (docs). sc-build at 1b4787a (after an exit-75 retry, dev at capacity):
+    release build, 41 unit + every integration test, router_identity 4
+    runs, clippy/doc, test crate. #21 widened; stormcos#76 told what the
+    ServiceAccount needs. Golden requested at 1b4787a.
