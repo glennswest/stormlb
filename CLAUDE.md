@@ -236,3 +236,18 @@ deliberate commit of its own.
     golden-stormlb-6301ae09b254 (stormcos#361).
     Capabilities: stormpump keeps all for a container today; noted on
     stormpump#47 that stormlb needs NET_ADMIN + NET_RAW once it sets a default.
+- [ ] #14 (P2) TLS for routed hosts. Nothing mints `*.storm1.<zone>` yet
+      (stormcert#1 open; gap 3, per-route certs, is stormcert's open
+      question), so stormlb terminates TLS with whatever pairs it is given
+      and stormcos mints/mounts the wildcard (issue to file there).
+  - [ ] `[router.tls]`: `listen` (auto:443), `certs` [{cert_file,key_file}],
+        `reload_secs`. SNI picks the pair whose names match (webpki's check,
+        wildcards included), else the first. Files reloaded on change;
+        missing/bad files: warn, keep serving the last good set (or none).
+  - [ ] `:80` 308s to https once a certificate is loaded (`redirect`,
+        default true), never `/healthz`. TLS connections get
+        `X-Forwarded-Proto: https` (a client's own one is dropped).
+  - [ ] Tests: openssl-made CA + wildcard + exact certs; SNI selection,
+        redirect, healthz exempt, reload on change, proto header.
+  - [ ] Docs, CHANGELOG; file stormcos (mint + mount the wildcard, enable
+        [router.tls]); sc-build, golden, close #14.
