@@ -174,29 +174,36 @@ deliberate commit of its own.
     (the test crate isn't in it): golden-stormlb-2d93cddd720c, stormcos#106.
     Owed: a clean `short` run at >= a120b52 once a test machine is up;
     `medium` by day, `long` at night on a pve VM.
-- [ ] #16 (P1) L4 API VIP whose backends change at runtime (stormcluster
+- [x] #16 (P1) L4 API VIP whose backends change at runtime (stormcluster
       endpoint.mode = vip; owner chose the VIP in stormcos#47, 2026-10-02).
       stormcluster has no client yet (its #10 waits on this), so the API
       shape is ours, as the issue proposes.
-  - [ ] pool: backends replaceable in place, keeping the health of the ones
+  - [x] pool: backends replaceable in place, keeping the health of the ones
         that stay (a PUT of the same masters never blacks the VIP out).
-  - [ ] health: `ca_file` (https verified against the cluster CA; unset =
+  - [x] health: `ca_file` (https verified against the cluster CA; unset =
         today's accept-any), spec changeable at runtime, a wake on change.
-  - [ ] balancer: bind with IP_FREEBIND + SO_REUSEADDR, so a node that does
+  - [x] balancer: bind with IP_FREEBIND + SO_REUSEADDR, so a node that does
         not hold the VIP yet can listen on it.
-  - [ ] vrrp: stoppable (flag; releases the VIP if Master), state readable.
-  - [ ] `src/vips.rs`: named VIPs (listener, pool, health, optional VRRP);
+  - [x] vrrp: stoppable (flag; releases the VIP if Master), state readable.
+  - [x] `src/vips.rs`: named VIPs (listener, pool, health, optional VRRP);
         apply = validate, bind new first, then swap; remove; snapshot.
         Legacy `[vip]`/`[[backend]]`/`[health]`/`[vrrp]` = VIP "default".
-  - [ ] `src/api.rs`: `[api] listen` (default 127.0.0.1:9103), optional
+  - [x] `src/api.rs`: `[api] listen` (default 127.0.0.1:9103), optional
         `token_file` (bearer; required off loopback), optional `state_file`
         (JSON, atomic, loaded at start). GET/PUT/DELETE
         /api/v1/vips/{name}, GET /api/v1/vips, /healthz.
-  - [ ] tests: registry + API end to end on loopback (PUT, traffic, change
+  - [x] tests: registry + API end to end on loopback (PUT, traffic, change
         backends, GET health, DELETE closes), https health with a CA
         (openssl at test time, tokio-rustls dev-dep), bad specs refused.
-  - [ ] docs: README (API, keys, defaults), design.md, deck, example, CHANGELOG.
-  - [ ] The apiserver binds 0.0.0.0:6443 on a master, so VIP:6443 cannot be
+  - [x] docs: README (API, keys, defaults), design.md, deck, example, CHANGELOG.
+  - [x] The apiserver binds 0.0.0.0:6443 on a master, so VIP:6443 cannot be
         bound there: file on stormcluster/stormcos (VIP port, or the
         apiserver's bind). #7 is what ownership needs next: prioritize it.
-  - [ ] sc-build, golden, close #16.
+  - [x] sc-build, golden, close #16.
+  - Done in 8bb44b7 (code), eea3571 (docs), 4f48304 (clippy). sc-build at
+    4f48304: release build, 28 unit + 1 + 8 (tests/vips.rs, 4 runs, the
+    https/CA test ran: openssl on dev) tests, clippy -D warnings, cargo doc
+    -D warnings, test crate 12 + 3. Filed stormcluster#35 (VIP port vs the
+    apiserver's 0.0.0.0:6443); #7 raised to P1. stormcentral registry config
+    now ships `[api] state_file = "/var/lib/stormlb/vips.json"` beside the
+    router. stormcluster's client is its #10.
