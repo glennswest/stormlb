@@ -418,8 +418,22 @@ socket: create, change backends (new members probed at once, members that
 stay keep their health, a proxied connection survives), move the listener,
 remove, refused changes leaving the VIP serving, the token, a restart from
 `state_file`, the config VIP read-only, and https health against a CA file
-(certificates made with `openssl` at test time; skipped without it). VRRP
-and BGP on the wire (raw socket, iproute2, a real peer) are not covered.
+(certificates made with `openssl` at test time; skipped without it).
+
+VRRP on a real wire, with no root: `tests/vrrp-netns.sh` runs two stormlb
+processes in two network namespaces joined by a veth, inside an unprivileged
+user namespace (`unshare -rn`). Each makes the same VIP through its API with
+VRRP on the veth. Checked against the kernel's `ip addr` and `ip neigh`:
+takeover after master-down, preemption by the higher priority, the
+gratuitous ARP updating the peer's neighbour entry, a resign on no healthy
+backend, preempting back, and priority 0 on removal cutting the takeover to
+about a second.
+
+```
+sc-build 'cargo build --release --locked && tests/vrrp-netns.sh'
+```
+
+BGP against a real peer is not covered.
 
 ### Tests on a node: the test container
 

@@ -19,6 +19,9 @@
   is read over rtnetlink. No `ip` or `arping` binary is used (the golden
   has neither). `libc` becomes a direct dependency (already locked).
 - **docs:** README (VRRP, `preempt`, gaps), design.md, deck, example.
+- **test:** `tests/vrrp-netns.sh`: two stormlb in two network namespaces on
+  a veth (unprivileged user namespace): takeover, preemption, gratuitous ARP,
+  health resign, preempting back, priority 0 on removal.
 
 - **feat:** runtime VIPs and the VIP API (#16). `[api]` (default
   `127.0.0.1:9103`) serves `GET/PUT/DELETE /api/v1/vips/{name}` and
