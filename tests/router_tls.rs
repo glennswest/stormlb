@@ -147,7 +147,13 @@ async fn the_router_terminates_tls_picks_certificates_by_sni_and_redirects() {
         tls: Some(TlsCfg { listen: format!("127.0.0.1:{https}"), certs: vec![pair("wild"), pair("other")], redirect: true, reload_secs: 1 }),
     };
     tokio::spawn(router::run(cfg));
-    let plain = || async { request(TcpStream::connect(("127.0.0.1", http)).await.unwrap(), "app.storm1.test", "/x?y=1").await };
+    // An empty answer while the router is still binding: `until` retries.
+    let plain = || async {
+        match TcpStream::connect(("127.0.0.1", http)).await {
+            Ok(c) => request(c, "app.storm1.test", "/x?y=1").await,
+            Err(_) => String::new(),
+        }
+    };
     assert!(until(10, async || plain().await.starts_with("HTTP/1.1 200")).await, "the route serves on plain HTTP while no certificate exists");
 
     // The certificates appear: picked up on the next reload.
