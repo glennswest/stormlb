@@ -61,6 +61,7 @@ spec() { # iface prio backend-port
         "$VIP" "$3" "$1" "$2"
 }
 holds() { ns "$1" ip -4 -o addr show dev "$2" | grep -q " $VIP/32"; }
+not_holds() { ! holds "$@"; }
 # Wait up to $1 seconds for a command to succeed; prints how long it took.
 within() {
     local limit=$1; shift
