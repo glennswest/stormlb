@@ -83,7 +83,7 @@ Router only if there is no `[vip]`. Otherwise the L4 balancer runs in the foregr
   1. the `storm.io/backend` annotation, `host:port` verbatim (`127.0.0.1:9094` = "this node's console" on every node)
   2. otherwise the first `backendRef`, resolved to the Service's `clusterIP:port`
 - **Survives the apiserver:** a failed poll keeps the last good table.
-- **Reads anonymously:** it works only against the sno and bastion apiservers, where anonymous is cluster-admin (#9). It also doesn't verify the apiserver's certificate (#10).
+- **Its identity:** `token_file` (its ServiceAccount's bearer token, re-read each poll) and `ca_file` (the apiserver verified against the cluster CA) (#9, #10). The golden doesn't set them until stormcos mints the token and mounts `/data/stormcert` (#21), so it still reads anonymously, on sno and bastion.
 - **Its own answers:** `400` with no Host, `404 no route for host <h>`, `200 router alive` for `/healthz` on an unclaimed host.
 - **`listen = "auto:80"`** binds the node's routable IPv4 plus loopback, not `0.0.0.0`, because stormimds holds `169.254.169.254:80`.
 
@@ -105,7 +105,7 @@ Unit-tested; `tests/balancer.rs` drives round-robin and failover through the rea
 
 | | Status |
 |---|---|
-| Router credentials for the apiserver, and a CA file to verify it | **planned**, #9, #10 |
+| Router credentials for the apiserver, and a CA file to verify it | **done** (#9, #10); set in the golden with #21 |
 | TLS on `:443` (`[router.tls]`: SNI, reload, 308 from `:80`) | **done** (#14); not in the golden until stormcos#363 mints and mounts the wildcard |
 | TLS to HTTPS-only backends (stormcos#81) | **done** (#13): `storm.io/backend-protocol: https`, verified against `backend_ca_file`; the golden sets it once stormcos#363 mounts the CA |
 | BGP reacting faster than the 60 s keepalive tick, waiting for Established, hold timer | **planned**, #6 |
@@ -176,8 +176,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 **Open issues that matter**
 
 - stormcos#363: the router's certificate isn't minted, and `/data/stormcert` isn't mounted, so the golden serves plain `:80` and https routes fail closed (stormcos#81)
-- #9: the router reads anonymously, so it works only on sno and bastion (`--dev-anonymous-admin`)
-- #10: no CA-file key, so the apiserver's certificate is never verified
+- #21: the golden's router reads anonymously until stormcos mints its token and mounts `/data/stormcert` (stormcos#76, #363)
 - #6: BGP reacts only on the 60 s tick
 
 ---

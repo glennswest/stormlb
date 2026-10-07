@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **feat:** the router's identity toward the apiserver (#9, #10).
+  `[router] token_file` (its ServiceAccount's bearer token, owner's choice in
+  stormcos#203) is sent on every apiserver request and re-read each poll; a
+  missing or empty file stops refreshes and keeps the last table.
+  `[router] ca_file` verifies the apiserver against that CA only (then
+  `insecure` is ignored), rebuilt when the file changes. A 401/403 names
+  what the router needs; refresh errors are logged once per distinct error.
+- **docs:** README (`token_file`, `ca_file`, `insecure`, route table, gaps),
+  design.md, deck, example.
+
 - **feat:** TLS to backends (#13). A route annotated
   `storm.io/backend-protocol: https` is dialled over TLS (ALPN http/1.1) and
   verified against `[router] backend_ca_file` only, for the backend's IP or

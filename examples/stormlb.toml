@@ -66,7 +66,9 @@ router_id = "192.168.8.51"
 # apiserver = "https://127.0.0.1:6443"
 # poll_secs = 5
 # backend_ca_file = "/data/stormcert/ca.crt"  # verifies routes with storm.io/backend-protocol: https
-# insecure = true                        # leave on: no CA-file key, webpki roots only (stormlb#10)
+# token_file = "/data/stormcert/stormlb.token"  # its ServiceAccount's bearer, re-read each poll
+# ca_file = "/data/stormcert/ca.crt"    # verify the apiserver (then insecure is ignored)
+# insecure = true                        # without ca_file: accept the apiserver's cert unverified
 #
 # TLS for routed hosts: certificates by SNI, re-read when they change; :80
 # redirects to https (except /healthz) once one is loaded.

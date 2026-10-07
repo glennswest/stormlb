@@ -75,7 +75,9 @@ TOML. Unknown keys are ignored. A fuller example is in
 | `apiserver` | `"https://127.0.0.1:6443"` | Where HTTPRoutes and Services are read from. |
 | `poll_secs` | `5` (min 1) | Seconds between route-table refreshes. |
 | `backend_ca_file` | none | The CA (PEM) a route's backend must chain to when the route says `storm.io/backend-protocol: https`; on a node, the cluster CA `/data/stormcert/ca.crt`. Only these certificates are trusted, not the public roots. Re-read on the route poll when it changes, so it may appear after the router starts. Unset or not loadable: https backends' connections fail closed. |
-| `insecure` | `true` | Accept the apiserver's certificate without verifying it. Leave it on: the client trusts only the public roots compiled into it, never the node's trust store, and there is no key for a CA file, so `false` refuses stormcert's certificate ([#10](https://github.com/glennswest/stormlb/issues/10)). |
+| `token_file` | none | The router's identity (#9): a file holding a bearer token, its ServiceAccount's, which stormcos mints with get/list/watch on HTTPRoutes and Services (stormcos#76 step 2). It's sent as `Authorization: Bearer` and re-read on every poll, so it can be rotated in place. Set but missing or empty: no refresh is made, and the last table keeps serving. Unset: anonymous, as before. |
+| `ca_file` | none | The CA (PEM) the apiserver's certificate must chain to, on a node `/data/stormcert/ca.crt` (#10). Only it is trusted, not public roots. Re-read when it changes, so it may appear after the router starts. When set, `insecure` is ignored. |
+| `insecure` | `true` | Without `ca_file`: accept the apiserver's certificate unverified. `false` without `ca_file` trusts only the public roots compiled in, which refuses stormcert's certificate. |
 
 `auto:<port>` picks the node's address by asking the routing table (a
 connected UDP socket to `203.0.113.1`, so nothing is sent). It binds that
@@ -180,15 +182,15 @@ If the preflight fails (bad ASN, no peers, `router_id` not IPv4), it logs
   stays on the first backend.
 - **The route table** is `GET {apiserver}/apis/gateway.networking.k8s.io/v1/httproutes`
   (all namespaces), polled every `poll_secs` with a 10 s timeout. On error it
-  keeps the last good table. **No credentials are sent**, so it works only
-  where anonymous may list HTTPRoutes and get Services. Today that is the
-  stormcos `sno` and `bastion` apiservers, which run `--dev-anonymous-admin`
-  (anonymous is cluster-admin; stormcos#76 step 2 turns it off once
-  stormlb has an identity). Against any other rustkube apiserver,
-  anonymous gets discovery only: every refresh is refused, the table stays
-  empty and every host is a 404
-  ([#9](https://github.com/glennswest/stormlb/issues/9)). Every `spec.hostnames`
-  entry maps to one backend:
+  keeps the last good table (a refusal is logged once per distinct error,
+  and a 401/403 says the router needs get/list on HTTPRoutes and get on
+  Services). With `token_file` it reads as its own ServiceAccount (#9);
+  without it, anonymously, which works only where anonymous may list
+  HTTPRoutes, i.e. the stormcos `sno` and `bastion` apiservers with
+  `--dev-anonymous-admin`. With `ca_file` the apiserver is verified against
+  the cluster CA (#10). The golden sets neither yet: the token and the mount
+  of `/data/stormcert` are stormcos's (stormcos#76, #363; stormlb#21).
+  Every `spec.hostnames` entry maps to one backend:
   1. the `storm.io/backend` annotation, `host:port` verbatim. This is how a
      node service routes: `127.0.0.1:9094` is "this node's console" on every
      node.
@@ -572,13 +574,12 @@ makes the Job.
 
 What the code does not do yet, which older docs implied it did:
 
-- [#9](https://github.com/glennswest/stormlb/issues/9): the router reads
-  HTTPRoutes and Services with no credentials. It works only against the sno
-  and bastion apiservers, where anonymous is cluster-admin
-  (`--dev-anonymous-admin`).
-- [#10](https://github.com/glennswest/stormlb/issues/10): `insecure = false`
-  can't work. The client trusts only compiled-in public roots, and there is
-  no CA-file key.
+- [#21](https://github.com/glennswest/stormlb/issues/21): the golden's
+  config doesn't set `token_file`, `ca_file`, `backend_ca_file` or
+  `[router.tls]` yet. They need stormlb's ServiceAccount token
+  (stormcos#76 step 2) and `/data/stormcert` mounted into its container
+  (stormcos#363), so the shipped router still reads anonymously, against
+  sno and bastion only.
 - [#6](https://github.com/glennswest/stormlb/issues/6): BGP reconciles
   announce/withdraw only on the 60 s keepalive tick. It doesn't wait for
   Established or enforce a hold timer.

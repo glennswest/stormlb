@@ -166,9 +166,12 @@ closes the client's connection without sending anything: a request
 carrying a bearer token must never reach a backend the router couldn't
 verify.
 
-Its apiserver client is the other gap. The router reads anonymously, which
-works only against the sno and bastion apiservers' `--dev-anonymous-admin`
-([#9](https://github.com/glennswest/stormlb/issues/9)). It also can't verify
-the apiserver's certificate, because it trusts only compiled-in public roots
-and has no CA-file key
-([#10](https://github.com/glennswest/stormlb/issues/10)).
+**Its own identity (#9, #10).** The owner chose a ServiceAccount of
+stormlb's own, with only what it reads (stormcos#203): stormcos mints the
+token and writes the RBAC, and the router reads the token from a file on
+every poll, so rotation needs no restart. The apiserver is verified against
+the cluster CA alone. Both are files the router is pointed at, not
+credentials it mints, which keeps stormlb out of certificate issuance. A
+missing token stops refreshes rather than falling back to anonymous, so a
+broken mount shows as a stale table and a log line, not as a silent change
+of identity.
