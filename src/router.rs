@@ -47,6 +47,7 @@ use tokio::sync::RwLock;
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 
+use crate::metrics::global as metrics;
 use crate::tls::{self, TlsCfg};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -168,7 +169,7 @@ pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
 }
 
 /// Bind `listen`: `auto:<port>` or `ip:port`.
-async fn bind_listeners(listen: &str) -> anyhow::Result<Vec<TcpListener>> {
+pub(crate) async fn bind_listeners(listen: &str) -> anyhow::Result<Vec<TcpListener>> {
     // `auto` means every address except the ones that are not ours to take.
     //
     // The wildcard includes 169.254.169.254, which the instance metadata
@@ -247,10 +248,18 @@ async fn serve_tls_on(listener: TcpListener, front: Front, acceptor: TlsAcceptor
         };
         let (front, acceptor) = (front.clone(), acceptor.clone());
         tokio::spawn(async move {
+            metrics().inc("stormlb_router_connections_total", &[("listener", "https")]);
+            let _active = metrics().active("stormlb_router_connections_active", &[("listener", "https")]);
             let tls = match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(conn)).await {
                 Ok(Ok(s)) => s,
-                Ok(Err(e)) => return tracing::debug!(%peer, "TLS handshake failed: {e}"),
-                Err(_) => return tracing::debug!(%peer, "TLS handshake timed out"),
+                Ok(Err(e)) => {
+                    metrics().inc("stormlb_router_tls_handshake_errors_total", &[]);
+                    return tracing::debug!(%peer, "TLS handshake failed: {e}");
+                }
+                Err(_) => {
+                    metrics().inc("stormlb_router_tls_handshake_errors_total", &[]);
+                    return tracing::debug!(%peer, "TLS handshake timed out");
+                }
             };
             if let Err(e) = serve_conn(tls, &front, true).await {
                 tracing::debug!(%peer, "connection ended: {e}");
@@ -269,6 +278,8 @@ async fn serve_on(listener: TcpListener, front: Front) -> anyhow::Result<()> {
         let (conn, peer) = listener.accept().await?;
         let front = front.clone();
         tokio::spawn(async move {
+            metrics().inc("stormlb_router_connections_total", &[("listener", "http")]);
+            let _active = metrics().active("stormlb_router_connections_active", &[("listener", "http")]);
             if let Err(e) = serve_conn(conn, &front, false).await {
                 // One line per failed connection, not per byte: the common
                 // errors here are a client that went away and a backend that
@@ -303,12 +314,18 @@ async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(mut conn: S, front: &Fron
     let host = match host_of(&head[..end]) {
         Some(h) => h,
         None => {
+            metrics().inc("stormlb_router_requests_total", &[("host", "unrouted"), ("code", "400")]);
             let _ = conn
                 .write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 26\r\nconnection: close\r\n\r\nthis router needs a Host\n\n")
                 .await;
             return Ok(());
         }
     };
+
+    let backend = { front.table.read().await.get(&host).cloned() };
+    // The metrics' host label: a route's hostname, never a client's arbitrary
+    // Host header (that would be unbounded cardinality).
+    let label = if backend.is_some() { host.as_str() } else { "unrouted" };
 
     // Plain HTTP goes to https once there is a certificate to serve it with,
     // except the health probe, which stays on plain HTTP.
@@ -319,12 +336,12 @@ async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(mut conn: S, front: &Fron
             let resp = format!(
                 "HTTP/1.1 308 Permanent Redirect\r\nlocation: https://{host}{port}{target}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
             );
+            metrics().inc("stormlb_router_requests_total", &[("host", label), ("code", "308")]);
             let _ = conn.write_all(resp.as_bytes()).await;
             return Ok(());
         }
     }
 
-    let backend = { front.table.read().await.get(&host).cloned() };
     // The router's own liveness, on any host no route claims: stormd probes
     // http://127.0.0.1/healthz, and 127.0.0.1 is never a route's hostname.
     // A host a route *does* claim proxies /healthz to its backend untouched.
@@ -336,6 +353,7 @@ async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(mut conn: S, front: &Fron
             "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
         );
+        metrics().inc("stormlb_router_requests_total", &[("host", "unrouted"), ("code", "200")]);
         let _ = conn.write_all(resp.as_bytes()).await;
         return Ok(());
     }
@@ -348,20 +366,85 @@ async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(mut conn: S, front: &Fron
             "HTTP/1.1 404 Not Found\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
         );
+        metrics().inc("stormlb_router_requests_total", &[("host", "unrouted"), ("code", "404")]);
         let _ = conn.write_all(resp.as_bytes()).await;
         return Ok(());
     };
 
-    let mut upstream = TcpStream::connect(&backend).await.map_err(|e| {
-        anyhow::anyhow!("backend {backend} for {host}: {e}")
-    })?;
+    let mut upstream = match TcpStream::connect(&backend).await {
+        Ok(u) => u,
+        Err(e) => {
+            metrics().inc("stormlb_router_upstream_errors_total", &[("host", &host), ("kind", "connect")]);
+            metrics().inc("stormlb_router_requests_total", &[("host", &host), ("code", "error")]);
+            anyhow::bail!("backend {backend} for {host}: {e}");
+        }
+    };
     if tls {
         upstream.write_all(&forwarded_https(&head, end)).await?;
     } else {
         upstream.write_all(&head).await?;
     }
-    tokio::io::copy_bidirectional(&mut conn, &mut upstream).await?;
+    let sent = std::time::Instant::now();
+    splice(conn, upstream, &host, sent).await
+}
+
+/// Copy both ways until both directions end, as `copy_bidirectional` does,
+/// but read the backend's first bytes on the way: its status code and the
+/// time to them are the request's metrics. The client→backend half runs
+/// concurrently throughout, so a request body is never held back waiting for
+/// a response that waits for it.
+async fn splice<S: AsyncRead + AsyncWrite + Unpin>(conn: S, upstream: TcpStream, host: &str, sent: std::time::Instant) -> anyhow::Result<()> {
+    let (mut cr, mut cw) = tokio::io::split(conn);
+    let (mut ur, mut uw) = upstream.into_split();
+    let up = async {
+        let r = tokio::io::copy(&mut cr, &mut uw).await;
+        let _ = uw.shutdown().await;
+        r
+    };
+    let down = async {
+        let mut buf = vec![0u8; 16 * 1024];
+        let n = match ur.read(&mut buf).await {
+            Ok(n) => n,
+            Err(e) => {
+                record_first(host, None, sent);
+                return Err(e);
+            }
+        };
+        record_first(host, (n > 0).then(|| &buf[..n]), sent);
+        if n > 0 {
+            cw.write_all(&buf[..n]).await?;
+            tokio::io::copy(&mut ur, &mut cw).await?;
+        }
+        let _ = cw.shutdown().await;
+        Ok::<_, std::io::Error>(())
+    };
+    let (u, d) = tokio::join!(up, down);
+    d?;
+    u?;
     Ok(())
+}
+
+/// Record a proxied request: the status of the backend's first bytes, or an
+/// upstream error when it sent none.
+fn record_first(host: &str, first: Option<&[u8]>, sent: std::time::Instant) {
+    match first {
+        Some(b) => {
+            metrics().observe("stormlb_router_request_duration_seconds", &[("host", host)], sent.elapsed());
+            let code = status_code(b).unwrap_or("other");
+            metrics().inc("stormlb_router_requests_total", &[("host", host), ("code", code)]);
+        }
+        None => {
+            metrics().inc("stormlb_router_upstream_errors_total", &[("host", host), ("kind", "no_response")]);
+            metrics().inc("stormlb_router_requests_total", &[("host", host), ("code", "error")]);
+        }
+    }
+}
+
+/// `"200"` from `HTTP/1.1 200 OK…`.
+fn status_code(b: &[u8]) -> Option<&str> {
+    let s = std::str::from_utf8(b.get(..12)?).ok()?;
+    let code = s.strip_prefix("HTTP/1.")?.get(2..5)?;
+    code.bytes().all(|c| c.is_ascii_digit()).then_some(code)
 }
 
 /// The request path, from the request line.
@@ -440,13 +523,18 @@ async fn poll_routes(cfg: RouterCfg, table: Table) {
     loop {
         match fetch_table(&client, &cfg.apiserver).await {
             Ok(new) => {
+                metrics().inc("stormlb_router_route_refreshes_total", &[("result", "ok")]);
+                metrics().gauge_set("stormlb_router_routes", &[], new.len() as i64);
                 if new.len() != last_len {
                     info!(routes = new.len(), "route table refreshed");
                     last_len = new.len();
                 }
                 *table.write().await = new;
             }
-            Err(e) => warn!("route refresh failed, keeping the last table: {e}"),
+            Err(e) => {
+                metrics().inc("stormlb_router_route_refreshes_total", &[("result", "error")]);
+                warn!("route refresh failed, keeping the last table: {e}");
+            }
         }
         tokio::time::sleep(Duration::from_secs(cfg.poll_secs.max(1))).await;
     }
@@ -552,6 +640,15 @@ mod tests {
         let end = find_head_end(head).unwrap();
         let out = String::from_utf8(forwarded_https(head, end)).unwrap();
         assert_eq!(out, "GET / HTTP/1.1\r\nX-Forwarded-Proto: https\r\nHost: a\r\nAccept: */*\r\n\r\nBODY");
+    }
+
+    #[test]
+    fn the_status_code_is_read_from_a_status_line() {
+        assert_eq!(status_code(b"HTTP/1.1 200 OK\r\n"), Some("200"));
+        assert_eq!(status_code(b"HTTP/1.0 404 Not Found"), Some("404"));
+        assert_eq!(status_code(b"HTTP/1.1 101 Switching"), Some("101"));
+        assert_eq!(status_code(b"SSH-2.0-OpenSSH"), None);
+        assert_eq!(status_code(b"HTTP/1.1 2"), None);
     }
 
     #[test]

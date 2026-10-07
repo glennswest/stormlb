@@ -107,6 +107,7 @@ impl Certs {
                     info!("router TLS: loaded {}", p.cert_file);
                     self.loaded.write().unwrap()[i] = Some(Loaded { leaf, key, stamp });
                     self.errors.write().unwrap()[i] = None;
+                    crate::metrics::global().inc("stormlb_router_tls_reloads_total", &[("result", "ok")]);
                 }
                 Err(e) => {
                     let msg = format!("{e:#}");
@@ -118,11 +119,14 @@ impl Certs {
                             warn!("router TLS: {}: {msg} (checked again every reload; logged once)", p.cert_file);
                         }
                         errors[i] = Some(msg);
+                        crate::metrics::global().inc("stormlb_router_tls_reloads_total", &[("result", "error")]);
                     }
                 }
             }
         }
-        self.count()
+        let n = self.count();
+        crate::metrics::global().gauge_set("stormlb_router_tls_certificates_loaded", &[], n as i64);
+        n
     }
 
     /// How many pairs are loaded.

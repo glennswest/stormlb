@@ -16,6 +16,7 @@
 //! - [`api`]      — the HTTP API stormcluster uses to set a VIP's backends.
 //! - [`router`]   — the L7 Host-header router over Gateway API HTTPRoutes.
 //! - [`tls`]      — the router's TLS termination: certificates by SNI, reloaded.
+//! - [`metrics`]  — Prometheus `/metrics` for the router and the VIPs.
 //! - [`config`]   — the TOML config; `[vip]`, `[router]` and `[api]` are each optional.
 //!
 //! The shipped golden runs the router alone; see README "How it ships".
@@ -25,6 +26,7 @@ pub mod balancer;
 pub mod bgp;
 pub mod config;
 pub mod health;
+pub mod metrics;
 pub mod pool;
 pub mod router;
 pub mod tls;

@@ -297,7 +297,7 @@ impl Registry {
                 health_ok(&spec.health)?;
                 let listener = if c.listen != e.listen { Some(bind(c.listen)?) } else { None };
                 if let Some(l) = listener {
-                    let old = std::mem::replace(&mut e.serve, spawn_serve(l, e.pool.clone()));
+                    let old = std::mem::replace(&mut e.serve, spawn_serve(l, e.pool.clone(), name));
                     old.abort();
                     info!("VIP {name}: listener moved {} -> {}", e.listen, c.listen);
                     e.listen = c.listen;
@@ -320,7 +320,7 @@ impl Registry {
                 let listener = bind(c.listen)?;
                 let pool = Arc::new(Pool::new(c.backends));
                 let health = tokio::spawn(health::run(pool.clone(), checker.clone()));
-                let serve = spawn_serve(listener, pool.clone());
+                let serve = spawn_serve(listener, pool.clone(), name);
                 let vrrp = start_vrrp(name, &spec, c.vrrp_vip, self.ctl.clone(), pool.clone());
                 info!("VIP {name} serving on {} -> {} backends", c.listen, pool.backends().len());
                 vips.insert(name.to_string(), Entry { spec, from_config, listen: c.listen, pool, checker, health, serve, vrrp });
@@ -379,9 +379,10 @@ fn view(name: &str, e: &Entry) -> VipView {
     }
 }
 
-fn spawn_serve(l: tokio::net::TcpListener, pool: Arc<Pool>) -> JoinHandle<()> {
+fn spawn_serve(l: tokio::net::TcpListener, pool: Arc<Pool>, name: &str) -> JoinHandle<()> {
+    let name = name.to_string();
     tokio::spawn(async move {
-        if let Err(e) = balancer::serve(l, pool).await {
+        if let Err(e) = balancer::serve_vip(l, pool, &name).await {
             warn!("L4 listener exited: {e:#}");
         }
     })

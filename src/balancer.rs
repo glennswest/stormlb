@@ -36,6 +36,12 @@ pub fn bind(listen: SocketAddr) -> Result<TcpListener> {
 /// Accept on an already-bound listener and proxy each connection to a healthy
 /// backend. Loops until a fatal accept error.
 pub async fn serve(listener: TcpListener, pool: Arc<Pool>) -> Result<()> {
+    serve_vip(listener, pool, "").await
+}
+
+/// [`serve`], counting into the metrics under `vip`'s name (#12).
+pub async fn serve_vip(listener: TcpListener, pool: Arc<Pool>, vip: &str) -> Result<()> {
+    let vip: Arc<str> = vip.into();
     loop {
         let (client, peer) = match listener.accept().await {
             Ok(x) => x,
@@ -44,9 +50,14 @@ pub async fn serve(listener: TcpListener, pool: Arc<Pool>) -> Result<()> {
                 continue;
             }
         };
-        let pool = pool.clone();
+        let (pool, vip) = (pool.clone(), vip.clone());
         tokio::spawn(async move {
+            let m = crate::metrics::global();
+            let l = [("vip", &*vip)];
+            m.inc("stormlb_vip_connections_total", &l);
+            let _active = m.active("stormlb_vip_connections_active", &l);
             let Some(be) = pool.pick() else {
+                m.inc("stormlb_vip_no_healthy_backend_total", &l);
                 warn!("no healthy backend for {peer} — dropping");
                 return;
             };
@@ -57,7 +68,10 @@ pub async fn serve(listener: TcpListener, pool: Arc<Pool>) -> Result<()> {
                         debug!("proxy {peer} -> {} closed: {e}", be.addr);
                     }
                 }
-                Err(e) => warn!("connect backend {} failed: {e}", be.addr),
+                Err(e) => {
+                    m.inc("stormlb_vip_upstream_connect_errors_total", &l);
+                    warn!("connect backend {} failed: {e}", be.addr)
+                }
             }
         });
     }

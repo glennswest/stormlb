@@ -138,6 +138,15 @@ async fn a_vip_is_created_its_backends_changed_and_removed() {
     assert_eq!(v["status"]["backends"][0]["healthy"], true, "B kept its health: {v}");
     assert!(until(5, async || reg.get("api").unwrap().status.healthy == 2).await);
 
+    // The VIP's metrics (#12): connections counted under its name, and each
+    // backend's health read at scrape time.
+    let text = stormlb::metrics::global().render(&stormlb::metrics::scrape_series(Some(&reg)));
+    let n = |series: &str| -> f64 {
+        text.lines().find_map(|l| l.strip_prefix(series)?.strip_prefix(' ')?.parse().ok()).unwrap_or_else(|| panic!("no {series} in:\n{text}"))
+    };
+    assert!(n(r#"stormlb_vip_connections_total{vip="api"}"#) >= 7.0);
+    assert_eq!(n(&format!(r#"stormlb_vip_backend_healthy{{vip="api",backend="{b}"}}"#)), 1.0);
+
     // The list.
     let (s, v) = call(api, "GET", "/api/v1/vips", None, None).await;
     assert_eq!(s, 200);

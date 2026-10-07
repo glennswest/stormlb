@@ -34,6 +34,17 @@ async fn main() -> Result<()> {
     let state_file = cfg.api.as_ref().and_then(|a| a.state_file.clone()).map(Into::into);
     let reg = Arc::new(Registry::new(state_file));
 
+    // Prometheus /metrics (#12). Not fatal: a port that can't be bound must
+    // not take the router or the VIPs down with it.
+    if let Some(m) = cfg.metrics.clone() {
+        let reg = reg.clone();
+        tokio::spawn(async move {
+            if let Err(e) = stormlb::metrics::run(m, Some(reg)).await {
+                warn!("metrics not served: {e:#}");
+            }
+        });
+    }
+
     // The TOML [vip] is the VIP `default`: a bad address or a listener that
     // cannot bind fails loudly at startup, as before the API existed.
     if let Some(spec) = Registry::config_spec(&cfg)? {

@@ -24,6 +24,9 @@ pub struct Config {
     /// enabled.
     #[serde(default)]
     pub api: Option<ApiCfg>,
+    /// Prometheus `/metrics` (#12). Present = enabled.
+    #[serde(default)]
+    pub metrics: Option<crate::metrics::MetricsCfg>,
 }
 
 /// `[api]`: the HTTP API that creates, changes and removes named VIPs at
