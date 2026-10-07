@@ -295,9 +295,10 @@ deliberate commit of its own.
         no CA configured), docs, CHANGELOG; sc-build, golden, close #13.
         Shipped config sets backend_ca_file only once stormcos mounts
         /data/stormcert into stormlb (stormcos#363) — note there.
-- [ ] #13 golden requested at e468486 (verified there: 41 unit + every
-      integration test, upstream TLS 4 runs, clippy/doc, test crate); close
-      #13 when it reports.
+- [x] #13 TLS to backends: done in 6d5bd9c/e2b0e92/e468486, verified at
+      e468486 (41 unit + every integration test, upstream TLS 4 runs,
+      clippy/doc, test crate). Golden golden-stormlb-9786a3ef39f1
+      (stormcos#361); #13 closed, #22 (clippy build-failure) closed.
 - [ ] #9 (P2) the router's identity, + #10 (its CA). Owner (stormcos#203,
       2026-10-01): stormlb gets its own ServiceAccount; stormcos mints the
       token and RBAC (stormcos#76 step 2); stormlb needs token_file + CA.
