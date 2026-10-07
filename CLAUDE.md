@@ -340,8 +340,13 @@ deliberate commit of its own.
     42 unit + every integration test, bgp 4 runs, clippy/doc, test crate.
     #23 closed. Golden blocked until stormcentral#521: #6 proposed after it.
     Then: `stormcentral component build stormlb`, close #6, shipped.
-- [ ] #15 (P3) docs: the registry entry is stormcentral's database
+- [x] #15 (P3) docs: the registry entry is stormcentral's database
       (`component export`/`edit`), not `components/stormcos.toml` (a seed
       since stormcentral#185); untrack tmp/lb-issue.md, tmp/sc-issue.md
       (tmp/ is already in .gitignore). Docs only: sc-build on a VM, no
       golden (nothing in it changes; component build is blocked anyway).
+  - Done in 690ff67, verified on a build VM there; closed. No golden.
+- [x] Comment-mining pass (2026-10-07): filed #24 (no clean runner run),
+      #25 (harness long wave flake), #26 (per-connection routing/metrics),
+      #27 (test/ headers vs stormcentral#121 option B), #28 (VIP port decided,
+      docs stale), all P3. Everything cross-component was already filed.
