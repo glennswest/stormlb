@@ -48,7 +48,7 @@ async fn round_robins_and_fails_over() {
     let a = spawn_backend(b'1').await;
     let b = spawn_backend(b'2').await;
     let pool = Arc::new(Pool::new([a, b]));
-    for be in &pool.backends {
+    for be in pool.backends() {
         be.set_healthy(true);
     }
 
@@ -70,13 +70,13 @@ async fn round_robins_and_fails_over() {
     );
 
     // Failover: mark backend '1' down — everything must go to '2'.
-    pool.backends[0].set_healthy(false);
+    pool.backends()[0].set_healthy(false);
     for _ in 0..6 {
         assert_eq!(who(baddr).await, b'2', "unhealthy backend must be skipped");
     }
 
     // All down: the balancer accepts then drops with no data.
-    pool.backends[1].set_healthy(false);
+    pool.backends()[1].set_healthy(false);
     let mut c = TcpStream::connect(baddr).await.unwrap();
     let mut buf = [0u8; 1];
     let n = c.read(&mut buf).await.unwrap_or(0);

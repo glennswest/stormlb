@@ -6,8 +6,8 @@ use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use stormlb::vip::{IpCmd, VipController};
-use stormlb::{balancer, bgp, config, health, pool::Pool, vrrp};
+use stormlb::vips::{Registry, CONFIG_VIP};
+use stormlb::{bgp, config};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -27,75 +27,40 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let cfg = config::load(&cli.config)?;
-
-    // Resolve backends up front so a bad address fails loudly at startup.
-    let mut addrs = Vec::new();
-    for b in &cfg.backends {
-        addrs.push(b.socket_addr()?);
+    if cfg.vip.is_none() && cfg.router.is_none() && cfg.api.is_none() {
+        anyhow::bail!("nothing to do: none of [vip], [router] or [api] is configured");
     }
-    if addrs.is_empty() {
-        warn!("no backends configured — the balancer will refuse every connection");
-    }
-    let pool = Arc::new(Pool::new(addrs));
 
-    // The L7 router is independent of the VIP: on a single node the VIP is
-    // the node's own address and only the Host demux is wanted, so
-    // [router] alone is a complete configuration.
-    let router = cfg.router.clone();
-    let Some(vip_cfg) = cfg.vip else {
-        let Some(rcfg) = router else {
-            anyhow::bail!("nothing to do: neither [vip] nor [router] is configured");
-        };
-        info!("stormlb starting — router only");
-        return stormlb::router::run(rcfg).await;
-    };
+    let state_file = cfg.api.as_ref().and_then(|a| a.state_file.clone()).map(Into::into);
+    let reg = Arc::new(Registry::new(state_file));
 
-    let vip: Ipv4Addr = vip_cfg
-        .address
-        .parse()
-        .map_err(|_| anyhow::anyhow!("vip.address must be an IPv4 address"))?;
-
-    info!(
-        "stormlb starting — vip={}:{} backends={} health={:?}",
-        vip_cfg.address,
-        vip_cfg.port,
-        cfg.backends.len(),
-        cfg.health.mode
-    );
-
-    // Health loop drives pool membership.
-    tokio::spawn(health::run(pool.clone(), cfg.health.clone()));
-
-    // VIP presentation. L2 (VRRP) claims the VIP on the elected Master; L3 (BGP
-    // anycast) has every node with a healthy backend advertise the /32.
-    // Without either, the VIP is assumed to be local already (single node,
-    // testing) and the balancer just listens on `vip.bind`.
-    if cfg.vrrp.enabled {
-        let iface = cfg.vrrp.interface.clone();
-        let (vrid, prio, ai) = (
-            cfg.vrrp.vrid,
-            cfg.vrrp.priority,
-            cfg.vrrp.advert_interval_secs,
+    // The TOML [vip] is the VIP `default`: a bad address or a listener that
+    // cannot bind fails loudly at startup, as before the API existed.
+    if let Some(spec) = Registry::config_spec(&cfg)? {
+        if spec.backends.is_empty() {
+            warn!("[vip] has no backends — the balancer will refuse every connection");
+        }
+        info!(
+            "stormlb starting — vip={}:{} backends={} health={:?}",
+            spec.address,
+            spec.port,
+            spec.backends.len(),
+            spec.health.mode
         );
-        // VRRP is a blocking control loop (raw socket + iproute2) — own OS thread.
-        std::thread::spawn(move || {
-            let ctl: Arc<dyn VipController> = Arc::new(IpCmd);
-            if let Err(e) = vrrp::run(vrid, prio, ai, &iface, vip, ctl) {
-                warn!("VRRP loop exited: {e}");
-            }
-        });
+        reg.start_config(spec)?;
     }
 
-    if cfg.bgp.enabled {
+    // L3: every node with a healthy backend advertises the config VIP's /32.
+    if let (true, Some(v)) = (cfg.bgp.enabled, &cfg.vip) {
+        let vip: Ipv4Addr = v.address.parse().map_err(|_| anyhow::anyhow!("bgp needs vip.address to be IPv4"))?;
         match bgp::preflight(&cfg.bgp) {
             Ok(next_hop) => {
-                // Advertise the VIP while this node has healthy backends.
                 let advertise = Arc::new(AtomicBool::new(false));
-                let p = pool.clone();
+                let pool = reg.pool(CONFIG_VIP).expect("the config VIP was started above");
                 let adv = advertise.clone();
                 tokio::spawn(async move {
                     loop {
-                        adv.store(p.healthy_count() > 0, Ordering::Relaxed);
+                        adv.store(pool.healthy_count() > 0, Ordering::Relaxed);
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 });
@@ -105,15 +70,41 @@ async fn main() -> Result<()> {
         }
     }
 
-    if let Some(rcfg) = router {
-        tokio::spawn(async move {
-            if let Err(e) = stormlb::router::run(rcfg).await {
-                warn!("router exited: {e}");
-            }
-        });
+    if cfg.api.is_some() {
+        match reg.load_state() {
+            Ok(0) => {}
+            Ok(n) => info!("{n} saved VIPs serving again"),
+            Err(e) => warn!("saved VIPs not loaded: {e:#}"),
+        }
     }
 
-    // L4 balancer listens on the configured bind address (default 0.0.0.0).
-    let listen = format!("{}:{}", vip_cfg.bind, vip_cfg.port).parse()?;
-    balancer::run(listen, pool).await
+    // The router alone is a complete configuration (single node: the VIP is
+    // the node's own address and only the Host demux is wanted). Then its
+    // exit is the process's; beside a VIP or the API it is only logged.
+    let router_alone = cfg.vip.is_none() && cfg.api.is_none();
+    let router = async {
+        match cfg.router.clone() {
+            Some(rcfg) if router_alone => {
+                info!("stormlb starting — router only");
+                stormlb::router::run(rcfg).await
+            }
+            Some(rcfg) => {
+                if let Err(e) = stormlb::router::run(rcfg).await {
+                    warn!("router exited: {e:#}");
+                }
+                std::future::pending().await
+            }
+            None => std::future::pending().await,
+        }
+    };
+    let api = async {
+        match cfg.api.clone() {
+            Some(a) => stormlb::api::run(a, reg.clone()).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        r = router => r,
+        r = api => r,
+    }
 }

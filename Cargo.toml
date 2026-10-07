@@ -28,3 +28,6 @@ socket2 = { version = "0.5", features = ["all"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+# tests/vips.rs: an https backend for the CA-verified health check. ring, as
+# reqwest's rustls already uses, so the lockfile gains no crate.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

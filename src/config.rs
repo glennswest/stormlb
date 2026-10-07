@@ -1,6 +1,6 @@
 //! stormlb configuration (TOML).
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
 #[derive(Debug, Deserialize)]
@@ -20,6 +20,33 @@ pub struct Config {
     /// The L7 Host-header router over HTTPRoutes. Present = enabled.
     #[serde(default)]
     pub router: Option<crate::router::RouterCfg>,
+    /// The VIP API: named VIPs created and changed at runtime. Present =
+    /// enabled.
+    #[serde(default)]
+    pub api: Option<ApiCfg>,
+}
+
+/// `[api]`: the HTTP API that creates, changes and removes named VIPs at
+/// runtime (`/api/v1/vips/{name}`; README "VIP API").
+#[derive(Debug, Deserialize, Clone)]
+pub struct ApiCfg {
+    /// Where the API listens. Loopback by default: the caller (stormcluster)
+    /// runs on the same node. Any other address needs `token_file`.
+    #[serde(default = "default_api_listen")]
+    pub listen: String,
+    /// A file holding the bearer token every `/api/v1` request must carry.
+    /// Re-read on each request, so it can be rotated in place. Unset: no
+    /// token, which is allowed only on a loopback `listen`.
+    #[serde(default)]
+    pub token_file: Option<String>,
+    /// Where the VIPs made through the API are kept (JSON, written atomically
+    /// on each change and loaded at start), so a restart serves them again
+    /// before the caller has re-applied them. Unset: kept in memory only.
+    #[serde(default)]
+    pub state_file: Option<String>,
+}
+fn default_api_listen() -> String {
+    "127.0.0.1:9103".to_string()
 }
 
 /// The virtual IP fronted by this balancer, and where the L4 proxy listens.
@@ -48,7 +75,7 @@ impl BackendCfg {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct HealthSpec {
     #[serde(default)]
     pub mode: HealthMode,
@@ -62,6 +89,10 @@ pub struct HealthSpec {
     /// HTTP status codes considered healthy.
     #[serde(default = "default_expect")]
     pub expect_status: Vec<u16>,
+    /// PEM CA certificate(s) an `https` check verifies the backend against
+    /// (the cluster CA for apiservers). Unset: any certificate is accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_file: Option<String>,
 }
 impl Default for HealthSpec {
     fn default() -> Self {
@@ -71,6 +102,7 @@ impl Default for HealthSpec {
             interval_secs: default_interval(),
             timeout_secs: default_timeout(),
             expect_status: default_expect(),
+            ca_file: None,
         }
     }
 }
@@ -87,7 +119,7 @@ fn default_expect() -> Vec<u16> {
     vec![200]
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum HealthMode {
     /// A successful TCP connect marks the backend healthy.
@@ -98,7 +130,7 @@ pub enum HealthMode {
 }
 
 /// VRRP (L2) VIP ownership — one node holds the VIP, sub-second failover.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq, Eq)]
 pub struct VrrpCfg {
     #[serde(default)]
     pub enabled: bool,
@@ -186,6 +218,21 @@ priority = 200
         assert!(cfg.vrrp.enabled);
         assert_eq!(cfg.vrrp.priority, 200);
         assert!(!cfg.bgp.enabled); // absent section
+    }
+
+    #[test]
+    fn api_defaults_to_loopback_with_no_token_or_state() {
+        let cfg: Config = toml::from_str("[api]\n").unwrap();
+        let api = cfg.api.unwrap();
+        assert_eq!(api.listen, "127.0.0.1:9103");
+        assert!(api.token_file.is_none() && api.state_file.is_none());
+        assert!(cfg.vip.is_none() && cfg.router.is_none());
+    }
+
+    #[test]
+    fn health_takes_a_ca_file() {
+        let cfg: Config = toml::from_str("[health]\nmode = \"https\"\nca_file = \"/data/stormcert/ca.crt\"\n").unwrap();
+        assert_eq!(cfg.health.ca_file.as_deref(), Some("/data/stormcert/ca.crt"));
     }
 
     #[test]

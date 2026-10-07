@@ -9,11 +9,28 @@ use tracing::{debug, info, warn};
 
 /// Bind `listen` and serve forever (see [`serve`]).
 pub async fn run(listen: SocketAddr, pool: Arc<Pool>) -> Result<()> {
-    let listener = TcpListener::bind(listen)
-        .await
-        .with_context(|| format!("binding L4 balancer on {listen}"))?;
+    let listener = bind(listen)?;
     info!("L4 balancer listening on {listen}");
     serve(listener, pool).await
+}
+
+/// Bind a listener for a VIP. `IP_FREEBIND` lets a node that does not hold
+/// the VIP yet (a VRRP Backup) listen on it, so it serves the moment the
+/// address arrives; `SO_REUSEADDR` lets a restart rebind past TIME_WAIT.
+pub fn bind(listen: SocketAddr) -> Result<TcpListener> {
+    use socket2::{Domain, Socket, Type};
+    let sock = Socket::new(Domain::for_address(listen), Type::STREAM, None)
+        .with_context(|| format!("socket for {listen}"))?;
+    sock.set_reuse_address(true)?;
+    if listen.is_ipv4() {
+        sock.set_freebind(true)?;
+    } else {
+        sock.set_freebind_ipv6(true)?;
+    }
+    sock.bind(&listen.into()).with_context(|| format!("binding L4 balancer on {listen}"))?;
+    sock.listen(1024).with_context(|| format!("listening on {listen}"))?;
+    sock.set_nonblocking(true)?;
+    TcpListener::from_std(sock.into()).with_context(|| format!("registering {listen}"))
 }
 
 /// Accept on an already-bound listener and proxy each connection to a healthy

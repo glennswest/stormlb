@@ -12,11 +12,14 @@
 //! - [`vrrp`]     — VRRP (RFC 5798) state machine for L2 VIP ownership/failover.
 //! - [`vip`]      — add/remove the VIP on an interface (Linux).
 //! - [`bgp`]      — BGP-anycast advertisement of the VIP (L3, active-active).
+//! - [`vips`]     — named VIPs (listener, pool, health, VRRP), changed at runtime.
+//! - [`api`]      — the HTTP API stormcluster uses to set a VIP's backends.
 //! - [`router`]   — the L7 Host-header router over Gateway API HTTPRoutes.
-//! - [`config`]   — the TOML config; `[vip]` and `[router]` are each optional.
+//! - [`config`]   — the TOML config; `[vip]`, `[router]` and `[api]` are each optional.
 //!
 //! The shipped golden runs the router alone; see README "How it ships".
 
+pub mod api;
 pub mod balancer;
 pub mod bgp;
 pub mod config;
@@ -24,4 +27,5 @@ pub mod health;
 pub mod pool;
 pub mod router;
 pub mod vip;
+pub mod vips;
 pub mod vrrp;

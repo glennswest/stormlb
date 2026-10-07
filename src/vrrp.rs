@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::mem::MaybeUninit;
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -29,6 +30,38 @@ pub enum State {
     Initialize,
     Backup,
     Master,
+}
+
+/// A running VRRP loop's handle: stop it, and read where it stands.
+#[derive(Default)]
+pub struct Handle {
+    stop: AtomicBool,
+    /// 0 not running, 1 Backup, 2 Master.
+    state: AtomicU8,
+}
+
+impl Handle {
+    /// Ask the loop to stop. It releases the VIP if it is Master, within
+    /// about half a second.
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+    /// `"master"`, `"backup"`, or `"stopped"` (not started, stopped, or failed).
+    pub fn state(&self) -> &'static str {
+        match self.state.load(Ordering::Relaxed) {
+            1 => "backup",
+            2 => "master",
+            _ => "stopped",
+        }
+    }
+    fn set(&self, s: State) {
+        let v = match s {
+            State::Backup => 1,
+            State::Master => 2,
+            State::Initialize => 0,
+        };
+        self.state.store(v, Ordering::Relaxed);
+    }
 }
 
 /// One VRRP virtual router instance.
@@ -190,7 +223,8 @@ pub fn interface_ipv4(iface: &str) -> Result<Ipv4Addr> {
 /// Run the VRRP control loop for one virtual router. Blocking — intended to be
 /// spawned on a dedicated OS thread. Sends advertisements while Master, watches
 /// for the master-down timeout while Backup, and claims/releases the VIP through
-/// `ctl` on transitions. Requires CAP_NET_ADMIN / CAP_NET_RAW.
+/// `ctl` on transitions. Requires CAP_NET_ADMIN / CAP_NET_RAW. Returns when
+/// `handle` is stopped, after releasing the VIP if it held it.
 pub fn run(
     vrid: u8,
     priority: u8,
@@ -198,6 +232,22 @@ pub fn run(
     iface: &str,
     vip: Ipv4Addr,
     ctl: Arc<dyn VipController>,
+    handle: Arc<Handle>,
+) -> Result<()> {
+    let r = run_loop(vrid, priority, advert_interval_secs, iface, vip, ctl, &handle);
+    handle.set(State::Initialize);
+    r
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_loop(
+    vrid: u8,
+    priority: u8,
+    advert_interval_secs: u64,
+    iface: &str,
+    vip: Ipv4Addr,
+    ctl: Arc<dyn VipController>,
+    handle: &Handle,
 ) -> Result<()> {
     let iface_ip = interface_ipv4(iface)?;
     let sock = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(IPPROTO_VRRP)))
@@ -215,6 +265,7 @@ pub fn run(
     let dst = SockAddr::from(SocketAddrV4::new(VRRP_MCAST, 0));
 
     let state = vr.start();
+    handle.set(state);
     info!(
         "VRRP vrid={vrid} priority={priority} iface={iface} vip={vip} -> {state:?}"
     );
@@ -228,14 +279,25 @@ pub fn run(
 
     let mut buf = [MaybeUninit::<u8>::uninit(); 512];
     loop {
-        // Wake for the next advert (Master) or the master-down deadline (Backup).
+        if handle.stop.load(Ordering::Relaxed) {
+            if vr.state == State::Master {
+                info!("VRRP vrid={vrid}: stopped — releasing VIP {vip}");
+                let _ = ctl.release(&vip_s, iface);
+            }
+            return Ok(());
+        }
+        handle.set(vr.state);
+        // Wake for the next advert (Master) or the master-down deadline
+        // (Backup), and at least every 500 ms to see a stop.
         let now = Instant::now();
         let wake = if vr.state == State::Master {
             next_advert
         } else {
             master_down_deadline
         };
-        let timeout = wake.saturating_duration_since(now).max(Duration::from_millis(10));
+        let timeout = wake
+            .saturating_duration_since(now)
+            .clamp(Duration::from_millis(10), Duration::from_millis(500));
         sock.set_read_timeout(Some(timeout))?;
 
         match sock.recv_from(&mut buf) {
