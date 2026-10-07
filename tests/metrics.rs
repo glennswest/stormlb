@@ -102,7 +102,7 @@ async fn metrics_count_what_the_router_did() {
     let dead: SocketAddr = format!("127.0.0.1:{}", free_port().await).parse().unwrap();
     let api = fake_api(app, dead).await;
     let http = free_port().await;
-    tokio::spawn(router::run(RouterCfg { listen: format!("127.0.0.1:{http}"), apiserver: api, poll_secs: 1, insecure: true, tls: None, backend_ca_file: None }));
+    tokio::spawn(router::run(RouterCfg { listen: format!("127.0.0.1:{http}"), apiserver: api, poll_secs: 1, insecure: true, tls: None, backend_ca_file: None, ca_file: None, token_file: None }));
     let ml = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mport = ml.local_addr().unwrap().port();
     tokio::spawn(stormlb::metrics::serve(ml, None));

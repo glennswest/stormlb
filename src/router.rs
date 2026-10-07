@@ -66,14 +66,22 @@ pub struct RouterCfg {
     /// Seconds between route-table refreshes.
     #[serde(default = "default_poll")]
     pub poll_secs: u64,
-    /// Accept the apiserver's certificate without verifying it. On by
-    /// default, and it has to be: the client trusts only the public web PKI
-    /// roots compiled into it (webpki-roots), never a trust store on the node,
-    /// and there is no key naming a CA file. With this off, stormcert's
-    /// apiserver certificate is refused and the router serves nothing
-    /// (stormlb#10).
+    /// Without `ca_file`: accept the apiserver's certificate unverified (the
+    /// default, as before `ca_file` existed). With `ca_file` it is ignored.
     #[serde(default = "default_insecure")]
     pub insecure: bool,
+    /// The CA (PEM) the apiserver's certificate must chain to — on a node,
+    /// `/data/stormcert/ca.crt`. Only it is trusted (stormlb#10). Re-read when
+    /// it changes.
+    #[serde(default)]
+    pub ca_file: Option<String>,
+    /// The router's identity (stormlb#9): a file holding a bearer token — its
+    /// ServiceAccount's, which stormcos mints with get/list/watch on
+    /// HTTPRoutes and Services. Re-read on every poll, so it can be rotated in
+    /// place. Unset: anonymous, which only an apiserver with
+    /// `--dev-anonymous-admin` lets list routes.
+    #[serde(default)]
+    pub token_file: Option<String>,
     /// `[router.tls]`: terminate TLS too. Absent: plain HTTP only.
     #[serde(default)]
     pub tls: Option<TlsCfg>,
@@ -568,17 +576,8 @@ fn host_of(head: &[u8]) -> Option<String> {
 /// Each turn also re-reads `backend_ca_file` if it changed.
 async fn poll_routes(cfg: RouterCfg, table: Table, upstream: Upstream) {
     let mut ca = CaState::default();
-    let client = match reqwest::Client::builder()
-        .danger_accept_invalid_certs(cfg.insecure)
-        .timeout(Duration::from_secs(10))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("router cannot build an http client: {e}");
-            return;
-        }
-    };
+    let mut api = ApiClient::default();
+    let mut said = None::<String>;
     let mut last_len = usize::MAX;
     loop {
         if let Some(path) = &cfg.backend_ca_file {
@@ -586,7 +585,11 @@ async fn poll_routes(cfg: RouterCfg, table: Table, upstream: Upstream) {
                 *upstream.write().unwrap() = Some(c);
             }
         }
-        match fetch_table(&client, &cfg.apiserver).await {
+        let fetched = match (api.client(&cfg), read_token(&cfg)) {
+            (Ok(client), Ok(token)) => fetch_table(&client, &cfg.apiserver, token.as_deref()).await,
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        };
+        match fetched {
             Ok(new) => {
                 metrics().inc("stormlb_router_route_refreshes_total", &[("result", "ok")]);
                 metrics().gauge_set("stormlb_router_routes", &[], new.len() as i64);
@@ -595,14 +598,94 @@ async fn poll_routes(cfg: RouterCfg, table: Table, upstream: Upstream) {
                     last_len = new.len();
                 }
                 *table.write().await = new;
+                said = None;
             }
             Err(e) => {
                 metrics().inc("stormlb_router_route_refreshes_total", &[("result", "error")]);
-                warn!("route refresh failed, keeping the last table: {e}");
+                // Once per distinct error, not every poll.
+                let msg = format!("{e:#}");
+                if said.as_deref() != Some(msg.as_str()) {
+                    warn!("route refresh failed, keeping the last table: {msg}");
+                    said = Some(msg);
+                }
             }
         }
         tokio::time::sleep(Duration::from_secs(cfg.poll_secs.max(1))).await;
     }
+}
+
+/// The apiserver client: verified against `ca_file` when it is set, rebuilt
+/// when that file changes (or first appears).
+#[derive(Default)]
+struct ApiClient {
+    client: Option<reqwest::Client>,
+    stamp: Option<std::time::SystemTime>,
+}
+
+impl ApiClient {
+    fn client(&mut self, cfg: &RouterCfg) -> anyhow::Result<reqwest::Client> {
+        let stamp = cfg.ca_file.as_deref().and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+        if let Some(c) = &self.client {
+            if stamp == self.stamp {
+                return Ok(c.clone());
+            }
+        }
+        let c = api_client(cfg)?;
+        if self.client.is_some() {
+            info!("router: apiserver CA {} reloaded", cfg.ca_file.as_deref().unwrap_or(""));
+        }
+        self.client = Some(c.clone());
+        self.stamp = stamp;
+        Ok(c)
+    }
+}
+
+/// A client for the apiserver: only `ca_file` trusted when it is set,
+/// otherwise `insecure` as before.
+fn api_client(cfg: &RouterCfg) -> anyhow::Result<reqwest::Client> {
+    use anyhow::Context;
+    let mut b = reqwest::Client::builder().timeout(Duration::from_secs(10));
+    match &cfg.ca_file {
+        Some(path) => {
+            let pem = std::fs::read(path).with_context(|| format!("[router] ca_file {path}"))?;
+            let certs = reqwest::Certificate::from_pem_bundle(&pem).with_context(|| format!("[router] ca_file {path}: not PEM"))?;
+            anyhow::ensure!(!certs.is_empty(), "[router] ca_file {path}: no certificate in it");
+            b = b.tls_built_in_root_certs(false);
+            for c in certs {
+                b = b.add_root_certificate(c);
+            }
+        }
+        None => b = b.danger_accept_invalid_certs(cfg.insecure),
+    }
+    b.build().context("building the apiserver client")
+}
+
+/// The router's bearer token, read fresh (rotation in place). None without
+/// `token_file`.
+fn read_token(cfg: &RouterCfg) -> anyhow::Result<Option<String>> {
+    let Some(path) = &cfg.token_file else { return Ok(None) };
+    let t = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("[router] token_file {path}: {e}"))?;
+    let t = t.trim();
+    anyhow::ensure!(!t.is_empty(), "[router] token_file {path} is empty");
+    Ok(Some(t.to_string()))
+}
+
+/// GET a JSON object from the apiserver, as the router. A 401/403 says what
+/// to fix.
+async fn api_get(client: &reqwest::Client, url: &str, token: Option<&str>) -> anyhow::Result<serde_json::Value> {
+    let mut req = client.get(url);
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    let resp = req.send().await?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        let who = if token.is_some() { "the router's token (token_file)" } else { "anonymous (no [router] token_file)" };
+        anyhow::bail!(
+            "{status} for {url}: {who} may not read it — the router needs get/list on httproutes and get on services (stormlb#9)"
+        );
+    }
+    Ok(resp.error_for_status()?.json().await?)
 }
 
 /// `backend_ca_file`'s last load: its mtime, and the last error logged (so a
@@ -659,14 +742,15 @@ fn upstream_connector(path: &str) -> anyhow::Result<TlsConnector> {
 async fn fetch_table(
     client: &reqwest::Client,
     api: &str,
+    token: Option<&str>,
 ) -> anyhow::Result<HashMap<String, Backend>> {
     let url = format!("{api}/apis/gateway.networking.k8s.io/v1/httproutes");
-    let list: serde_json::Value = client.get(&url).send().await?.error_for_status()?.json().await?;
+    let list = api_get(client, &url, token).await?;
     let mut out = HashMap::new();
     for r in list["items"].as_array().into_iter().flatten() {
         let ns = r["metadata"]["namespace"].as_str().unwrap_or("default");
         let name = r["metadata"]["name"].as_str().unwrap_or("");
-        let backend = match backend_of(client, api, ns, r).await.and_then(|addr| with_protocol(r, addr)) {
+        let backend = match backend_of(client, api, token, ns, r).await.and_then(|addr| with_protocol(r, addr)) {
             Ok(b) => b,
             Err(e) => {
                 warn!(route = %format!("{ns}/{name}"), "no usable backend: {e}");
@@ -706,6 +790,7 @@ fn with_protocol(route: &serde_json::Value, addr: String) -> anyhow::Result<Back
 async fn backend_of(
     client: &reqwest::Client,
     api: &str,
+    token: Option<&str>,
     ns: &str,
     route: &serde_json::Value,
 ) -> anyhow::Result<String> {
@@ -719,7 +804,7 @@ async fn backend_of(
     let port = bref["port"].as_u64().unwrap_or(80);
     let sns = bref["namespace"].as_str().unwrap_or(ns);
     let url = format!("{api}/api/v1/namespaces/{sns}/services/{svc}");
-    let s: serde_json::Value = client.get(&url).send().await?.error_for_status()?.json().await?;
+    let s = api_get(client, &url, token).await?;
     let ip = s["spec"]["clusterIP"]
         .as_str()
         .filter(|ip| !ip.is_empty() && *ip != "None")

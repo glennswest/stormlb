@@ -161,6 +161,8 @@ async fn https_backends_are_verified_against_the_ca_or_not_reached() {
         insecure: true,
         tls: None,
         backend_ca_file: Some(trust.to_str().unwrap().into()),
+        ca_file: None,
+        token_file: None,
     }));
     let end = Instant::now() + Duration::from_secs(10);
     while !get(port, "plain.test").await.ends_with("plain") {

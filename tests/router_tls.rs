@@ -146,6 +146,8 @@ async fn the_router_terminates_tls_picks_certificates_by_sni_and_redirects() {
         insecure: true,
         tls: Some(TlsCfg { listen: format!("127.0.0.1:{https}"), certs: vec![pair("wild"), pair("other")], redirect: true, reload_secs: 1 }),
         backend_ca_file: None,
+        ca_file: None,
+        token_file: None,
     };
     tokio::spawn(router::run(cfg));
     // An empty answer while the router is still binding: `until` retries.
