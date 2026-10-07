@@ -139,7 +139,7 @@ fn keepalive_msg() -> Vec<u8> {
 
 /// Encode `<prefix_len>` + the significant prefix bytes (BGP prefix encoding).
 fn encode_prefix(prefix: Ipv4Addr, prefix_len: u8) -> Vec<u8> {
-    let bytes = ((prefix_len as usize) + 7) / 8;
+    let bytes = (prefix_len as usize).div_ceil(8);
     let mut v = Vec::with_capacity(1 + bytes);
     v.push(prefix_len);
     v.extend_from_slice(&prefix.octets()[..bytes]);

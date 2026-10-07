@@ -301,7 +301,7 @@ async fn https_health_checks_verify_against_the_ca_file() {
         ca_file: Some(dir.join(ca).to_str().unwrap().into()),
     };
     let reg = Registry::new(None);
-    for (name, ca, want) in [("good", "ca.crt", true), ("other", "other-ca.crt", false)] {
+    for (name, ca) in [("good", "ca.crt"), ("other", "other-ca.crt")] {
         let s = VipSpec {
             address: "127.0.0.1".into(),
             port: free_port().await,
