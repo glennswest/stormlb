@@ -208,3 +208,20 @@ deliberate commit of its own.
     now ships `[api] state_file = "/var/lib/stormlb/vips.json"` beside the
     router. stormcluster's client is its #10. Golden
     golden-stormlb-12f8f607164a at 4f48304 (stormcos#361); #16 closed, shipped.
+- [ ] #7 (P1, needed by #16's VIPs moving between masters) VRRP per RFC 5798
+      and no binaries:
+  - [ ] State machine made pure (actions out, loop executes) so every rule
+        is unit-tested: Backup preempt (§6.4.2, `preempt` key, default true:
+        a lower-priority advert is discarded so the timer expires), learn
+        the Master's advert interval, priority 0 → Skew_Time, Master sends
+        priority 0 when it stops.
+  - [ ] Ownership follows health: no healthy backend → a Master resigns
+        (priority 0, release, Backup) and a Backup never takes over; health
+        back → normal. The owner (255) starts Backup while unhealthy.
+  - [ ] Wire fixes: checksum over the IPv4 pseudo-header, TTL 255 checked.
+  - [ ] `src/vip.rs`: netlink (RTM_GETLINK/GETADDR/NEWADDR/DELADDR) and a
+        gratuitous ARP on an AF_PACKET socket, replacing `ip`/`arping`;
+        `interface_ipv4` by netlink. `libc` as a direct dependency (already
+        locked). Unprivileged tests on dev: `lo` lookup, encodings.
+  - [ ] Docs (README VRRP, keys, gaps; design; deck; example), CHANGELOG.
+  - [ ] sc-build, golden, close #7.
