@@ -55,6 +55,11 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ("stormlb_vip_upstream_connect_errors_total", "counter", "Connections dropped because the chosen backend refused or failed."),
     ("stormlb_vip_backend_healthy", "gauge", "1 if a VIP's backend passes its health check, else 0."),
     ("stormlb_vip_vrrp_master", "gauge", "1 while this node is the VRRP Master for the VIP, else 0 (absent without VRRP)."),
+    ("process_resident_memory_bytes", "gauge", "Resident memory of this stormlb process."),
+    ("process_open_fds", "gauge", "Open file descriptors of this stormlb process."),
+    ("process_max_fds", "gauge", "This process's open-file limit."),
+    ("process_cpu_seconds_total", "counter", "User and system CPU time of this stormlb process."),
+    ("process_start_time_seconds", "gauge", "When this process started, in seconds since the Unix epoch."),
 ];
 
 #[derive(Default, Clone)]
@@ -141,11 +146,16 @@ impl Metrics {
 
     /// The text exposition: every recorded series, plus `extra` series
     /// (name, labels, value) computed at scrape time.
-    pub fn render(&self, extra: &[(&'static str, String, i64)]) -> String {
-        let counters = self.counters.lock().unwrap().clone();
-        let mut gauges = self.gauges.lock().unwrap().clone();
+    pub fn render(&self, extra: &[(&'static str, String, f64)]) -> String {
+        let mut counters: BTreeMap<Key, f64> = self.counters.lock().unwrap().iter().map(|(k, v)| (k.clone(), *v as f64)).collect();
+        let mut gauges: BTreeMap<Key, f64> = self.gauges.lock().unwrap().iter().map(|(k, v)| (k.clone(), *v as f64)).collect();
         for (n, l, v) in extra {
-            gauges.insert((n, l.clone()), *v);
+            let is_counter = CATALOG.iter().any(|(c, t, _)| c == n && *t == "counter");
+            if is_counter {
+                counters.insert((n, l.clone()), *v);
+            } else {
+                gauges.insert((n, l.clone()), *v);
+            }
         }
         let hists = self.hists.lock().unwrap().clone();
         let mut out = String::new();
@@ -208,15 +218,54 @@ impl Drop for ActiveGuard {
 
 /// The series computed at scrape time: build info, and each VIP's backend
 /// health and VRRP state.
-pub fn scrape_series(reg: Option<&Registry>) -> Vec<(&'static str, String, i64)> {
-    let mut out = vec![("stormlb_build_info", labels(&[("version", env!("CARGO_PKG_VERSION"))]), 1)];
+pub fn scrape_series(reg: Option<&Registry>) -> Vec<(&'static str, String, f64)> {
+    let mut out = vec![("stormlb_build_info", labels(&[("version", env!("CARGO_PKG_VERSION"))]), 1.0)];
+    out.extend(process_series());
     for v in reg.map(|r| r.list()).unwrap_or_default() {
         for b in &v.status.backends {
             let be = format!("{}:{}", b.address, b.port);
-            out.push(("stormlb_vip_backend_healthy", labels(&[("vip", &v.name), ("backend", &be)]), b.healthy as i64));
+            out.push(("stormlb_vip_backend_healthy", labels(&[("vip", &v.name), ("backend", &be)]), b.healthy as i64 as f64));
         }
         if let Some(s) = v.status.vrrp {
-            out.push(("stormlb_vip_vrrp_master", labels(&[("vip", &v.name)]), (s == "master") as i64));
+            out.push(("stormlb_vip_vrrp_master", labels(&[("vip", &v.name)]), (s == "master") as i64 as f64));
+        }
+    }
+    out
+}
+
+/// The standard `process_*` series for this process, from `/proc/self`.
+/// stormd's own `/metrics` describes stormd, not the process it supervises
+/// (stormd#33), so the router reports itself.
+pub fn process_series() -> Vec<(&'static str, String, f64)> {
+    let mut out = Vec::new();
+    // SAFETY: sysconf has no preconditions.
+    let (page, tick) = unsafe { (libc::sysconf(libc::_SC_PAGESIZE) as f64, libc::sysconf(libc::_SC_CLK_TCK) as f64) };
+    if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
+        if let Some(rss) = statm.split_whitespace().nth(1).and_then(|v| v.parse::<f64>().ok()) {
+            out.push(("process_resident_memory_bytes", String::new(), rss * page));
+        }
+    }
+    if let Ok(d) = std::fs::read_dir("/proc/self/fd") {
+        out.push(("process_open_fds", String::new(), d.count() as f64));
+    }
+    let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: lim is a valid out-pointer.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } == 0 {
+        out.push(("process_max_fds", String::new(), lim.rlim_cur as f64));
+    }
+    if let Ok(stat) = std::fs::read_to_string("/proc/self/stat") {
+        // Fields after the `(comm)`, which may contain spaces: utime is the
+        // 14th field overall, stime the 15th, starttime the 22nd.
+        let rest: Vec<&str> = stat.rsplit_once(')').map(|(_, r)| r.split_whitespace().collect()).unwrap_or_default();
+        let f = |i: usize| rest.get(i - 3).and_then(|v| v.parse::<f64>().ok());
+        if let (Some(u), Some(s)) = (f(14), f(15)) {
+            out.push(("process_cpu_seconds_total", String::new(), (u + s) / tick));
+        }
+        let boot = std::fs::read_to_string("/proc/stat")
+            .ok()
+            .and_then(|t| t.lines().find_map(|l| l.strip_prefix("btime ")?.trim().parse::<f64>().ok()));
+        if let (Some(start), Some(boot)) = (f(22), boot) {
+            out.push(("process_start_time_seconds", String::new(), boot + start / tick));
         }
     }
     out
@@ -302,7 +351,7 @@ mod tests {
         drop(guard);
         assert!(g.render(&[]).contains("stormlb_router_connections_active{listener=\"http\"} 0\n"));
 
-        let t = m.render(&[("stormlb_build_info", labels(&[("version", "9.9.9")]), 1)]);
+        let t = m.render(&[("stormlb_build_info", labels(&[("version", "9.9.9")]), 1.0)]);
         assert!(t.contains("# TYPE stormlb_router_requests_total counter\n"), "{t}");
         assert!(t.contains("stormlb_router_requests_total{host=\"a.test\",code=\"200\"} 2\n"), "{t}");
         assert!(t.contains("stormlb_router_requests_total{host=\"we\\\"ird\\\\\",code=\"404\"} 1\n"), "{t}");
@@ -312,6 +361,15 @@ mod tests {
         assert!(t.contains("stormlb_router_request_duration_seconds_bucket{host=\"a.test\",le=\"0.05\"} 1\n"), "{t}");
         assert!(t.contains("stormlb_router_request_duration_seconds_bucket{host=\"a.test\",le=\"+Inf\"} 1\n"), "{t}");
         assert!(t.contains("stormlb_router_request_duration_seconds_count{host=\"a.test\"} 1\n"), "{t}");
+        // The process reports itself, with plausible values.
+        let p = m.render(&process_series());
+        let v = |n: &str| p.lines().find_map(|l| l.strip_prefix(n)?.strip_prefix(' ')?.parse::<f64>().ok()).unwrap();
+        assert!(v("process_resident_memory_bytes") > 1e5, "{p}");
+        assert!(v("process_open_fds") >= 3.0, "{p}");
+        assert!(v("process_max_fds") >= v("process_open_fds"), "{p}");
+        assert!(v("process_cpu_seconds_total") >= 0.0, "{p}");
+        assert!(v("process_start_time_seconds") > 1.7e9, "{p}");
+        assert!(p.contains("# TYPE process_cpu_seconds_total counter\n"), "{p}");
         // Nothing recorded, nothing printed (no empty HELP blocks).
         assert!(!t.contains("stormlb_vip_connections_total"), "{t}");
         // Every sample line is `name{labels} value`.
