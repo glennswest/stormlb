@@ -114,6 +114,10 @@ async fn metrics_count_what_the_router_did() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
+    // Everything below is counted against this scrape: the wait above saw
+    // 404s until the first route refresh.
+    let before = send(mport, &get("x", "/metrics")).await;
+
     // Two more to app.test, one of them an 8 MiB upload the backend reads in
     // full before it answers.
     assert!(send(http, &get("app.test", "/x")).await.starts_with("HTTP/1.1 201"));
@@ -133,15 +137,17 @@ async fn metrics_count_what_the_router_did() {
     let (head, text) = m.split_once("\r\n\r\n").unwrap();
     assert!(head.starts_with("HTTP/1.1 200") && head.contains("text/plain; version=0.0.4"), "{head}");
     let s = |series: &str| sample(text, series).unwrap_or_else(|| panic!("no {series} in:\n{text}"));
-    assert!(s(r#"stormlb_router_requests_total{host="app.test",code="201"}"#) >= 3.0, "the backend's own code, per host");
-    assert_eq!(s(r#"stormlb_router_requests_total{host="unrouted",code="404"}"#), 1.0);
-    assert_eq!(s(r#"stormlb_router_requests_total{host="unrouted",code="400"}"#), 1.0);
-    assert_eq!(s(r#"stormlb_router_requests_total{host="unrouted",code="200"}"#), 1.0);
-    assert_eq!(s(r#"stormlb_router_requests_total{host="dead.test",code="error"}"#), 1.0);
-    assert_eq!(s(r#"stormlb_router_upstream_errors_total{host="dead.test",kind="connect"}"#), 1.0);
-    assert!(s(r#"stormlb_router_request_duration_seconds_count{host="app.test"}"#) >= 3.0);
-    assert!(s(r#"stormlb_router_request_duration_seconds_bucket{host="app.test",le="+Inf"}"#) >= 3.0);
-    assert!(s(r#"stormlb_router_connections_total{listener="http"}"#) >= 9.0);
+    // How much a series grew since `before` (absent before = 0).
+    let d = |series: &str| s(series) - sample(&before, series).unwrap_or(0.0);
+    assert_eq!(d(r#"stormlb_router_requests_total{host="app.test",code="201"}"#), 2.0, "the backend's own code, per host");
+    assert_eq!(d(r#"stormlb_router_requests_total{host="unrouted",code="404"}"#), 1.0);
+    assert_eq!(d(r#"stormlb_router_requests_total{host="unrouted",code="400"}"#), 1.0);
+    assert_eq!(d(r#"stormlb_router_requests_total{host="unrouted",code="200"}"#), 1.0);
+    assert_eq!(d(r#"stormlb_router_requests_total{host="dead.test",code="error"}"#), 1.0);
+    assert_eq!(d(r#"stormlb_router_upstream_errors_total{host="dead.test",kind="connect"}"#), 1.0);
+    assert_eq!(d(r#"stormlb_router_request_duration_seconds_count{host="app.test"}"#), 2.0);
+    assert_eq!(d(r#"stormlb_router_request_duration_seconds_bucket{host="app.test",le="+Inf"}"#), 2.0);
+    assert_eq!(d(r#"stormlb_router_connections_total{listener="http"}"#), 6.0);
     assert!(s("stormlb_router_routes") == 2.0);
     assert!(s(r#"stormlb_router_route_refreshes_total{result="ok"}"#) >= 1.0);
     assert!(text.contains("stormlb_build_info{version=\""), "{text}");
