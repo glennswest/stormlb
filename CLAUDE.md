@@ -339,7 +339,9 @@ deliberate commit of its own.
     Passed on a fresh build VM (SC_BUILD_VM=1) at 19fd477: release build,
     42 unit + every integration test, bgp 4 runs, clippy/doc, test crate.
     #23 closed. Golden blocked until stormcentral#521: #6 proposed after it.
-    Then: `stormcentral component build stormlb`, close #6, shipped.
+    #521 closed 13:27Z; the first `component build` (6ae901601af3, 13:38Z)
+    still went to dev.g8.lo (no route): stormcentral's VM-build golden
+    installs ~14:40Z. Retry queued for 14:45Z; then close #6, shipped.
 - [x] #15 (P3) docs: the registry entry is stormcentral's database
       (`component export`/`edit`), not `components/stormcos.toml` (a seed
       since stormcentral#185); untrack tmp/lb-issue.md, tmp/sc-issue.md
