@@ -74,6 +74,7 @@ TOML. Unknown keys are ignored. A fuller example is in
 | `listen` | `"0.0.0.0:80"` | Address to listen on. `"auto:<port>"` binds this node's routable IPv4 and `127.0.0.1` on `<port>`; see below. |
 | `apiserver` | `"https://127.0.0.1:6443"` | Where HTTPRoutes and Services are read from. |
 | `poll_secs` | `5` (min 1) | Seconds between route-table refreshes. |
+| `backend_ca_file` | none | The CA (PEM) a route's backend must chain to when the route says `storm.io/backend-protocol: https`; on a node, the cluster CA `/data/stormcert/ca.crt`. Only these certificates are trusted, not the public roots. Re-read on the route poll when it changes, so it may appear after the router starts. Unset or not loadable: https backends' connections fail closed. |
 | `insecure` | `true` | Accept the apiserver's certificate without verifying it. Leave it on: the client trusts only the public roots compiled into it, never the node's trust store, and there is no key for a CA file, so `false` refuses stormcert's certificate ([#10](https://github.com/glennswest/stormlb/issues/10)). |
 
 `auto:<port>` picks the node's address by asking the routing table (a
@@ -195,6 +196,13 @@ If the preflight fails (bad ASN, no peers, `router_id` not IPv4), it logs
      `GET /api/v1/namespaces/{ns}/services/{name}` to `clusterIP:port` (port
      default 80, namespace default = the route's). A headless or missing
      Service skips the route with a warning.
+
+  Either way, `storm.io/backend-protocol` says how to reach it: `http`
+  (the default) or `https`. With `https` the router dials TLS (ALPN
+  `http/1.1`) and verifies the backend against `backend_ca_file`, for the
+  address's IP (an IP SAN) or for `storm.io/backend-server-name` if the
+  route sets it (also sent as SNI). Any other value skips the route with a
+  warning.
 - Matching is **exact hostname only**. There are no wildcard hostnames, no
   path/header matches, and no rules or backendRefs beyond the first.
 - Responses of its own:
@@ -204,15 +212,19 @@ If the preflight fails (bad ASN, no peers, `router_id` not IPv4), it logs
     A host a route does claim gets its `/healthz` proxied to the backend.
   - If a backend can't be dialled, the connection closes with no response
     (logged at `debug`). There is no 502.
-- **TLS in, plaintext out.** With `[router.tls]`, a second listener
+- **TLS on either side.** With `[router.tls]`, a second listener
   terminates TLS (ALPN `http/1.1`) and feeds the same demux. The head sent
   to the backend gains `X-Forwarded-Proto: https`, and any
   `X-Forwarded-Proto` the client sent is dropped. Plain-HTTP requests carry
-  the head unchanged. The connection to the backend is a bare TCP dial, so a backend that serves only HTTPS
-  (the apiserver, cadvisor under stormcos#81) can't sit behind a route: it
-  receives plaintext and the client sees the connection close
-  ([#13](https://github.com/glennswest/stormlb/issues/13)). A client's
-  `Authorization` header is passed through untouched.
+  the head unchanged. Toward the backend, a route marked
+  `storm.io/backend-protocol: https` gets TLS verified against
+  `backend_ca_file` (#13), so an HTTPS-only backend (the apiserver,
+  cadvisor under stormcos#81) can sit behind a route. Verification fails
+  closed: with no CA loaded, a name the certificate lacks, or another CA's
+  certificate, nothing is sent and the client's connection closes
+  (`stormlb_router_upstream_errors_total{kind="tls"}`). A client's
+  `Authorization` header is passed through untouched, so bearer-guarded
+  backends need nothing more. The router presents no client certificate.
 
 ### VIP API
 
@@ -379,7 +391,7 @@ happened are printed.
 |---|---|---|---|
 | `stormlb_router_requests_total` | counter | `host`, `code` | Requests: the first of each connection, which is what the router routes. `host` is a route's hostname, or `unrouted` for the router's own answers (a client's Host header never becomes a label). `code` is the backend's status, the router's own (`400`, `404`, `308`, `200` for `/healthz`), or `error` when the backend gave no response. |
 | `stormlb_router_request_duration_seconds` | histogram | `host` | From the request reaching the backend to its first response byte. Buckets 5 ms to 10 s. |
-| `stormlb_router_upstream_errors_total` | counter | `host`, `kind` | `connect` (refused, unreachable) or `no_response` (closed before a byte). |
+| `stormlb_router_upstream_errors_total` | counter | `host`, `kind` | `connect` (refused, unreachable), `tls` (an https backend: no CA loaded, verification or handshake failed) or `no_response` (closed before a byte). |
 | `stormlb_router_connections_total`, `stormlb_router_connections_active` | counter, gauge | `listener` (`http`, `https`) | Connections accepted, and open now. |
 | `stormlb_router_tls_handshake_errors_total` | counter | | Failed or timed-out TLS handshakes. |
 | `stormlb_router_routes` | gauge | | Hostnames in the route table. |
@@ -578,8 +590,9 @@ What the code does not do yet, which older docs implied it did:
   (stormcos#81 allows nothing else off-node, which is why it is loopback).
 - Metrics count the first request of each keep-alive connection only (the
   router splices after the first head).
-- [#13](https://github.com/glennswest/stormlb/issues/13): the upstream
-  connection is always plaintext, so an HTTPS-only backend can't be routed.
+- `backend_ca_file` isn't set in the golden: stormlb's container doesn't
+  mount `/data/stormcert` yet (stormcos#363), so an https route fails closed
+  on a node until it does.
 - [stormcos#363](https://github.com/glennswest/stormcos/issues/363): the
   router can terminate TLS, but no node mints its certificate or mounts it
   into stormlb's container yet, so the golden serves plain `:80` only.

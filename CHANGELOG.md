@@ -3,6 +3,17 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **feat:** TLS to backends (#13). A route annotated
+  `storm.io/backend-protocol: https` is dialled over TLS (ALPN http/1.1) and
+  verified against `[router] backend_ca_file` only, for the backend's IP or
+  `storm.io/backend-server-name` (also the SNI). The CA is re-read on the
+  route poll when it changes. Fails closed: no CA, a wrong name or another
+  CA's certificate sends nothing and counts
+  `stormlb_router_upstream_errors_total{kind="tls"}`. Any other protocol
+  value skips the route.
+- **docs:** README (`backend_ca_file`, the annotations, router, metrics,
+  gaps), design.md, deck, example.
+
 - **feat:** Prometheus `/metrics` (#12, stormcos#64). `[metrics] listen`
   (default `auto:9104`: the node's address and loopback) serves the text
   format: `stormlb_router_requests_total{host,code}` (the backend's code or

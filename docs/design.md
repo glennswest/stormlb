@@ -154,9 +154,17 @@ the router doesn't depend on how stormcert will deliver per-route
 certificates (stormcert#1, gap 3): any number of pairs, chosen by SNI,
 already works. `:80` redirects once a certificate is loaded, never before,
 so a node without one keeps working over plain HTTP. `/healthz` stays plain
-because the health probe is the one exemption #81 allows. The router still
-dials every backend over bare TCP, so an HTTPS-only backend can't be routed
-([#13](https://github.com/glennswest/stormlb/issues/13)).
+because the health probe is the one exemption #81 allows.
+
+**TLS to backends is per route (#13).** A route opts in with
+`storm.io/backend-protocol: https`, because a backend's scheme is a fact
+about that backend, not about the router. The router trusts only
+`backend_ca_file` (the cluster CA), never public roots, so a route can't
+be pointed at something that merely has a valid web certificate. It
+verifies the IP the route names, or a name the route gives. Every failure
+closes the client's connection without sending anything: a request
+carrying a bearer token must never reach a backend the router couldn't
+verify.
 
 Its apiserver client is the other gap. The router reads anonymously, which
 works only against the sno and bastion apiservers' `--dev-anonymous-admin`
