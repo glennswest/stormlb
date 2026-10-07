@@ -317,3 +317,15 @@ deliberate commit of its own.
     runs, clippy/doc, test crate. #21 widened; stormcos#76 told what the
     ServiceAccount needs. Golden golden-stormlb-b14fc90f2a1d (stormcos#361);
     #9 and #10 closed, shipped.
+- [ ] #6 (P3) BGP: reconcile on change, Established first, hold timer.
+  - [ ] advertise is a watch channel fed every 250 ms from the pool (not an
+        AtomicBool read on the 60 s keepalive tick): announce/withdraw at once.
+  - [ ] FSM: OPEN sent → peer OPEN validated (version 4, peer AS = config,
+        hold 0 or ≥ 3; NOTIFICATION 2/1, 2/2, 2/6 otherwise) → KEEPALIVE →
+        Established; no UPDATE before. Hold = min(180, peer's); keepalive
+        hold/3; hold timer on received messages (NOTIFICATION 4/0).
+  - [ ] Reader task + channel (read_exact in select! is not cancel-safe).
+  - [ ] `[[bgp.peers]] port` (default 179) — and for the test.
+  - [ ] tests/bgp.rs with a fake peer: nothing before Established, announce
+        at once, withdraw within a second of health loss, hold-timer expiry,
+        bad peer AS. Docs, CHANGELOG, sc-build, golden, close #6.
