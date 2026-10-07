@@ -28,6 +28,11 @@
 //! plain HTTP answers with a 308 to https, except `/healthz`. The upstream
 //! connection is plain either way (TLS to backends is #13).
 //!
+//! **TLS to backends** (#13): a route with `storm.io/backend-protocol: https`
+//! is dialled over TLS and verified against `[router] backend_ca_file` only,
+//! for the backend's IP (or `storm.io/backend-server-name`). Without a CA the
+//! connection fails closed; nothing is sent to a backend it can't verify.
+//!
 //! Backends resolve two ways, in order:
 //! - the `storm.io/backend` annotation, `host:port` verbatim. This is how a
 //!   *node* service routes — `127.0.0.1:9094` means "this node's console"
@@ -44,7 +49,7 @@ use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::{info, warn};
 
 use crate::metrics::global as metrics;
@@ -72,6 +77,12 @@ pub struct RouterCfg {
     /// `[router.tls]`: terminate TLS too. Absent: plain HTTP only.
     #[serde(default)]
     pub tls: Option<TlsCfg>,
+    /// The CA (PEM) a backend marked `storm.io/backend-protocol: https` must
+    /// chain to — on a node, the cluster CA `/data/stormcert/ca.crt`. Only
+    /// these certificates are trusted. Re-read on the route poll when it
+    /// changes. Unset: an https backend's connections fail closed.
+    #[serde(default)]
+    pub backend_ca_file: Option<String>,
 }
 
 /// The addresses `auto` resolves to: this node's, minus the ones that belong
@@ -120,15 +131,28 @@ fn default_apiserver() -> String { "https://127.0.0.1:6443".into() }
 fn default_poll() -> u64 { 5 }
 fn default_insecure() -> bool { true }
 
-/// hostname -> "host:port" to dial.
-type Table = Arc<RwLock<HashMap<String, String>>>;
+/// A route's backend: where to dial, and for TLS, the name its certificate
+/// must carry (an IP literal means an IP SAN; it is also the SNI when a name).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Backend {
+    addr: String,
+    tls: Option<String>,
+}
+
+/// hostname -> its backend.
+type Table = Arc<RwLock<HashMap<String, Backend>>>;
+
+/// The connector for TLS backends, built from `backend_ca_file`; None until
+/// the file loads.
+type Upstream = Arc<std::sync::RwLock<Option<TlsConnector>>>;
 
 pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
     let table: Table = Arc::new(RwLock::new(HashMap::new()));
     let mut plain = bind_listeners(&cfg.listen).await?;
     info!(listen = %cfg.listen, apiserver = %cfg.apiserver, "router up");
 
-    tokio::spawn(poll_routes(cfg.clone(), table.clone()));
+    let upstream: Upstream = Arc::default();
+    tokio::spawn(poll_routes(cfg.clone(), table.clone(), upstream.clone()));
 
     let mut redirect = None;
     if let Some(t) = &cfg.tls {
@@ -144,7 +168,7 @@ pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
         match bind_listeners(&t.listen).await {
             Ok(ls) => {
                 let acceptor = TlsAcceptor::from(tls::server_config(certs.clone()));
-                let front = Front { table: table.clone(), redirect: None };
+                let front = Front { table: table.clone(), upstream: upstream.clone(), redirect: None };
                 for l in ls {
                     tokio::spawn(serve_tls_on(l, front.clone(), acceptor.clone()));
                 }
@@ -158,7 +182,7 @@ pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
         }
     }
 
-    let front = Front { table, redirect };
+    let front = Front { table, upstream, redirect };
     let first = plain.remove(0);
     // Everything after the first is served by its own task over the same
     // routes.
@@ -219,6 +243,7 @@ pub(crate) async fn bind_listeners(listen: &str) -> anyhow::Result<Vec<TcpListen
 #[derive(Clone)]
 struct Front {
     table: Table,
+    upstream: Upstream,
     redirect: Option<Arc<Redirect>>,
 }
 
@@ -226,7 +251,7 @@ impl Front {
     /// Plain HTTP, no redirect.
     #[cfg(test)]
     fn plain(table: Table) -> Front {
-        Front { table, redirect: None }
+        Front { table, upstream: Arc::default(), redirect: None }
     }
 }
 
@@ -371,21 +396,50 @@ async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(mut conn: S, front: &Fron
         return Ok(());
     };
 
-    let mut upstream = match TcpStream::connect(&backend).await {
+    let fail = |kind: &str| {
+        metrics().inc("stormlb_router_upstream_errors_total", &[("host", &host), ("kind", kind)]);
+        metrics().inc("stormlb_router_requests_total", &[("host", &host), ("code", "error")]);
+    };
+    let tcp = match TcpStream::connect(&backend.addr).await {
         Ok(u) => u,
         Err(e) => {
-            metrics().inc("stormlb_router_upstream_errors_total", &[("host", &host), ("kind", "connect")]);
-            metrics().inc("stormlb_router_requests_total", &[("host", &host), ("code", "error")]);
-            anyhow::bail!("backend {backend} for {host}: {e}");
+            fail("connect");
+            anyhow::bail!("backend {} for {host}: {e}", backend.addr);
         }
     };
-    if tls {
-        upstream.write_all(&forwarded_https(&head, end)).await?;
-    } else {
-        upstream.write_all(&head).await?;
+    let head = if tls { forwarded_https(&head, end) } else { head };
+    let Some(name) = &backend.tls else {
+        return forward(conn, tcp, &head, &host).await;
+    };
+    // TLS to the backend, verified against the CA, or nothing at all.
+    let Some(connector) = front.upstream.read().unwrap().clone() else {
+        fail("tls");
+        anyhow::bail!("backend {} for {host} is https, but no [router] backend_ca_file is loaded", backend.addr);
+    };
+    let server = tokio_rustls::rustls::pki_types::ServerName::try_from(name.clone())
+        .map_err(|e| anyhow::anyhow!("backend name {name:?} for {host}: {e}"))?;
+    match tokio::time::timeout(Duration::from_secs(10), connector.connect(server, tcp)).await {
+        Ok(Ok(s)) => forward(conn, s, &head, &host).await,
+        Ok(Err(e)) => {
+            fail("tls");
+            anyhow::bail!("TLS to backend {} ({name}) for {host}: {e}", backend.addr)
+        }
+        Err(_) => {
+            fail("tls");
+            anyhow::bail!("TLS to backend {} ({name}) for {host}: handshake timed out", backend.addr)
+        }
     }
+}
+
+/// Send the head to the backend, then splice.
+async fn forward<S, U>(conn: S, mut upstream: U, head: &[u8], host: &str) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    U: AsyncRead + AsyncWrite + Unpin,
+{
+    upstream.write_all(head).await?;
     let sent = std::time::Instant::now();
-    splice(conn, upstream, &host, sent).await
+    splice(conn, upstream, host, sent).await
 }
 
 /// Copy both ways until both directions end, as `copy_bidirectional` does,
@@ -393,9 +447,13 @@ async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(mut conn: S, front: &Fron
 /// time to them are the request's metrics. The client→backend half runs
 /// concurrently throughout, so a request body is never held back waiting for
 /// a response that waits for it.
-async fn splice<S: AsyncRead + AsyncWrite + Unpin>(conn: S, upstream: TcpStream, host: &str, sent: std::time::Instant) -> anyhow::Result<()> {
+async fn splice<S, U>(conn: S, upstream: U, host: &str, sent: std::time::Instant) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    U: AsyncRead + AsyncWrite + Unpin,
+{
     let (mut cr, mut cw) = tokio::io::split(conn);
-    let (mut ur, mut uw) = upstream.into_split();
+    let (mut ur, mut uw) = tokio::io::split(upstream);
     let up = async {
         let r = tokio::io::copy(&mut cr, &mut uw).await;
         let _ = uw.shutdown().await;
@@ -507,7 +565,9 @@ fn host_of(head: &[u8]) -> Option<String> {
 }
 
 /// Refresh the table forever. Serves the last good table across errors.
-async fn poll_routes(cfg: RouterCfg, table: Table) {
+/// Each turn also re-reads `backend_ca_file` if it changed.
+async fn poll_routes(cfg: RouterCfg, table: Table, upstream: Upstream) {
+    let mut ca = CaState::default();
     let client = match reqwest::Client::builder()
         .danger_accept_invalid_certs(cfg.insecure)
         .timeout(Duration::from_secs(10))
@@ -521,6 +581,11 @@ async fn poll_routes(cfg: RouterCfg, table: Table) {
     };
     let mut last_len = usize::MAX;
     loop {
+        if let Some(path) = &cfg.backend_ca_file {
+            if let Some(c) = ca.reload(path) {
+                *upstream.write().unwrap() = Some(c);
+            }
+        }
         match fetch_table(&client, &cfg.apiserver).await {
             Ok(new) => {
                 metrics().inc("stormlb_router_route_refreshes_total", &[("result", "ok")]);
@@ -540,17 +605,68 @@ async fn poll_routes(cfg: RouterCfg, table: Table) {
     }
 }
 
+/// `backend_ca_file`'s last load: its mtime, and the last error logged (so a
+/// missing file is said once).
+#[derive(Default)]
+struct CaState {
+    stamp: Option<std::time::SystemTime>,
+    loaded: bool,
+    error: Option<String>,
+}
+
+impl CaState {
+    /// A new connector when the file changed and loads; None otherwise (the
+    /// last good one stays).
+    fn reload(&mut self, path: &str) -> Option<TlsConnector> {
+        let stamp = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        if self.loaded && stamp == self.stamp {
+            return None;
+        }
+        match upstream_connector(path) {
+            Ok(c) => {
+                info!("router: backend CA {path} loaded");
+                self.stamp = stamp;
+                self.loaded = true;
+                self.error = None;
+                Some(c)
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if self.error.as_deref() != Some(msg.as_str()) {
+                    warn!("router: backend_ca_file {path}: {msg} (https backends fail until it loads)");
+                    self.error = Some(msg);
+                }
+                None
+            }
+        }
+    }
+}
+
+/// A TLS client trusting only the certificates in `path`, HTTP/1.1.
+fn upstream_connector(path: &str) -> anyhow::Result<TlsConnector> {
+    use anyhow::Context;
+    use tokio_rustls::rustls::pki_types::{pem::PemObject, CertificateDer};
+    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+    for c in CertificateDer::pem_file_iter(path).with_context(|| format!("reading {path}"))? {
+        roots.add(c.with_context(|| format!("parsing {path}"))?).with_context(|| format!("{path}: not a usable CA"))?;
+    }
+    anyhow::ensure!(!roots.is_empty(), "{path}: no certificate in it");
+    let mut cfg = tokio_rustls::rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(TlsConnector::from(Arc::new(cfg)))
+}
+
 async fn fetch_table(
     client: &reqwest::Client,
     api: &str,
-) -> anyhow::Result<HashMap<String, String>> {
+) -> anyhow::Result<HashMap<String, Backend>> {
     let url = format!("{api}/apis/gateway.networking.k8s.io/v1/httproutes");
     let list: serde_json::Value = client.get(&url).send().await?.error_for_status()?.json().await?;
     let mut out = HashMap::new();
     for r in list["items"].as_array().into_iter().flatten() {
         let ns = r["metadata"]["namespace"].as_str().unwrap_or("default");
         let name = r["metadata"]["name"].as_str().unwrap_or("");
-        let backend = match backend_of(client, api, ns, r).await {
+        let backend = match backend_of(client, api, ns, r).await.and_then(|addr| with_protocol(r, addr)) {
             Ok(b) => b,
             Err(e) => {
                 warn!(route = %format!("{ns}/{name}"), "no usable backend: {e}");
@@ -564,6 +680,27 @@ async fn fetch_table(
         }
     }
     Ok(out)
+}
+
+/// The backend with the route's protocol: `storm.io/backend-protocol`
+/// `http` (or absent) or `https`; for https, the name to verify is
+/// `storm.io/backend-server-name`, else the address's host.
+fn with_protocol(route: &serde_json::Value, addr: String) -> anyhow::Result<Backend> {
+    let a = &route["metadata"]["annotations"];
+    match a["storm.io/backend-protocol"].as_str().map(str::to_ascii_lowercase).as_deref() {
+        None | Some("http") => Ok(Backend { addr, tls: None }),
+        Some("https") => {
+            let name = match a["storm.io/backend-server-name"].as_str() {
+                Some(n) => n.to_string(),
+                None => {
+                    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&addr);
+                    host.trim_start_matches('[').trim_end_matches(']').to_string()
+                }
+            };
+            Ok(Backend { addr, tls: Some(name) })
+        }
+        Some(p) => anyhow::bail!("storm.io/backend-protocol {p:?}: want http or https"),
+    }
 }
 
 async fn backend_of(
@@ -649,6 +786,20 @@ mod tests {
         assert_eq!(status_code(b"HTTP/1.1 101 Switching"), Some("101"));
         assert_eq!(status_code(b"SSH-2.0-OpenSSH"), None);
         assert_eq!(status_code(b"HTTP/1.1 2"), None);
+    }
+
+    #[test]
+    fn the_backend_protocol_and_name_come_from_annotations() {
+        let r = |a: serde_json::Value| serde_json::json!({ "metadata": { "annotations": a } });
+        let b = |a, addr: &str| with_protocol(&r(a), addr.into());
+        assert_eq!(b(serde_json::json!({}), "10.0.0.1:80").unwrap().tls, None);
+        assert_eq!(b(serde_json::json!({"storm.io/backend-protocol": "HTTP"}), "10.0.0.1:80").unwrap().tls, None);
+        let https = serde_json::json!({"storm.io/backend-protocol": "https"});
+        assert_eq!(b(https.clone(), "127.0.0.1:9096").unwrap().tls.as_deref(), Some("127.0.0.1"));
+        assert_eq!(b(https, "[::1]:9096").unwrap().tls.as_deref(), Some("::1"));
+        let named = serde_json::json!({"storm.io/backend-protocol": "https", "storm.io/backend-server-name": "cadvisor.node"});
+        assert_eq!(b(named, "127.0.0.1:9096").unwrap().tls.as_deref(), Some("cadvisor.node"));
+        assert!(b(serde_json::json!({"storm.io/backend-protocol": "h2c"}), "1.2.3.4:5").is_err());
     }
 
     #[test]
