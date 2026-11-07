@@ -9,7 +9,7 @@ location. Current: 0.1.0.
 No cargo on the session VM: build/test with `sc-build` after pushing. It
 runs on a fresh build VM; dev.g8.lo was retired on 2026-10-07. Until the new
 stormcentral golden makes VMs the default, use `SC_BUILD_VM=1 sc-build …`.
-`component build` is blocked until stormcentral#521.
+`component build` works (stormcentral#521 closed 2026-10-07).
 Goldens build with `cargo build --release --locked`, so `Cargo.lock` is
 committed and must stay in sync with `Cargo.toml`. `cargo update` is a
 deliberate commit of its own.
@@ -364,7 +364,14 @@ deliberate commit of its own.
   - [ ] Registry config gains `ca_file` and `[router.tls] certs =
         [router.crt/key]`: the master runs the `component edit` (our token
         can't, #829); `stormcentral note` with the file and why.
-  - [ ] token_file split into its own issue, proposed after stormcos#76.
-  - [ ] Docs (README router/how it ships/gaps, design.md, deck), CHANGELOG.
-  - [ ] sc-build, then (once the registry has it) golden; `shipped` #21 with
+        Sent (`stormcentral note`, 2026-11-07): `component edit stormlb
+        --file tmp/stormlb-component.toml` (export with only the config
+        text changed). Golden only once `component export` shows it.
+  - [x] token_file split into #33 (P2), proposed after stormcos#76.
+  - [x] Docs (README router/how it ships/gaps, design.md, deck), CHANGELOG,
+        unit test `parses_the_shipped_router_config`: 0b6d496. Noted on #31
+        which of its stale lines that fixes.
+  - [x] sc-build passed at 0b6d496 on a build VM: release build, 43 unit +
+        every integration test, clippy and cargo doc -D warnings.
+  - [ ] Then (once the registry has it) golden; `shipped` #21 with
         a proof on the node.
