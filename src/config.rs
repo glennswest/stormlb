@@ -238,6 +238,41 @@ priority = 200
         assert!(!cfg.bgp.enabled); // absent section
     }
 
+    /// The `[router]` part of the golden's config (stormcentral registry,
+    /// stormlb#21): tier-0's CA for the apiserver and backends, and the
+    /// router's own pair from stormcos's `stormcert-serving-router`.
+    #[test]
+    fn parses_the_shipped_router_config() {
+        let toml = r#"
+[router]
+listen = "auto:80"
+backend_ca_file = "/data/stormcert/ca.crt"
+ca_file = "/data/stormcert/ca.crt"
+
+[router.tls]
+certs = [{ cert_file = "/data/stormcert/router.crt", key_file = "/data/stormcert/router.key" }]
+
+[api]
+state_file = "/var/lib/stormlb/vips.json"
+
+[metrics]
+listen = "auto:9104"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let r = cfg.router.unwrap();
+        assert_eq!(r.listen, "auto:80");
+        assert_eq!(r.apiserver, "https://127.0.0.1:6443");
+        assert_eq!(r.ca_file.as_deref(), Some("/data/stormcert/ca.crt"));
+        assert_eq!(r.backend_ca_file.as_deref(), Some("/data/stormcert/ca.crt"));
+        assert!(r.token_file.is_none(), "token_file waits on stormcos#76");
+        let t = r.tls.unwrap();
+        assert_eq!(t.listen, "auto:443");
+        assert!(t.redirect);
+        assert_eq!(t.certs.len(), 1);
+        assert_eq!(t.certs[0].cert_file, "/data/stormcert/router.crt");
+        assert_eq!(t.certs[0].key_file, "/data/stormcert/router.key");
+    }
+
     #[test]
     fn api_defaults_to_loopback_with_no_token_or_state() {
         let cfg: Config = toml::from_str("[api]\n").unwrap();

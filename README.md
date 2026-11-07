@@ -188,8 +188,9 @@ If the preflight fails (bad ASN, no peers, `router_id` not IPv4), it logs
   without it, anonymously, which works only where anonymous may list
   HTTPRoutes, i.e. the stormcos `sno` and `bastion` apiservers with
   `--dev-anonymous-admin`. With `ca_file` the apiserver is verified against
-  the cluster CA (#10). The golden sets neither yet: the token and the mount
-  of `/data/stormcert` are stormcos's (stormcos#76, #363; stormlb#21).
+  the cluster CA (#10). The golden sets `ca_file` (`/data/stormcert/ca.crt`,
+  #21) but no `token_file` yet: the token is stormcos's (stormcos#76;
+  stormlb#33), so the shipped router still reads anonymously.
   Every `spec.hostnames` entry maps to one backend:
   1. the `storm.io/backend` annotation, `host:port` verbatim. This is how a
      node service routes: `127.0.0.1:9094` is "this node's console" on every
@@ -375,8 +376,8 @@ advertises the same /32, so the upstream router ECMP-hashes across them.
 
 | Port | Proto | Who | When |
 |---|---|---|---|
-| `[router] listen`: **80** in the golden | TCP, plain HTTP/1.x, no auth | clients via `*.storm1.<zone>`; stormd's liveness probe on `127.0.0.1:80/healthz` | `[router]` present |
-| `[router.tls] listen`: **443** | TLS 1.2/1.3, then HTTP/1.x | clients via `*.storm1.<zone>` | `[router.tls]` present (not in the golden yet: stormcos#363) |
+| `[router] listen`: **80** in the golden | TCP, plain HTTP/1.x, no auth; 308 to https once a `[router.tls]` pair loads (the golden) | clients via `*.storm1.<zone>`; stormd's liveness probe on `127.0.0.1:80/healthz` | `[router]` present |
+| `[router.tls] listen`: **443** | TLS 1.2/1.3, then HTTP/1.x | clients via `*.storm1.<zone>` | `[router.tls]` present (the golden: `auto:443`, the router's pair from stormcos#363) |
 | `[vip] port`, e.g. 6443, and each API VIP's `port` | TCP | kube-api clients via the VIP | `[vip]` present, or a VIP made through the API |
 | `[metrics] listen`: **9104** (`auto`: node address and loopback) | plain HTTP, read-only, no token | ironprom on the node; stormcos `check-metrics.sh` | `[metrics]` present |
 | `[api] listen`: **127.0.0.1:9103** by default | plain HTTP, JSON; a bearer token with `token_file` | stormcluster, on the same node | `[api]` present |
@@ -386,10 +387,11 @@ advertises the same /32, so the upstream router ECMP-hashes across them.
 
 stormcos#81 requires every listener on a node to be TLS with a stormcert
 certificate and to authenticate, health probes excepted. The router can
-serve TLS (`[router.tls]`, #14), but no node has its certificate yet:
-minting `*.storm1.<zone>` and mounting it into stormlb's container is
-stormcos#363. Until then the golden serves plain `:80` only, which
-stormcos `docs/SECURITY.md` lists as failing the rule. A routed host's own
+serve TLS (`[router.tls]`, #14), and the golden turns it on (#21): stormcos
+mints `/data/stormcert/router.{crt,key}` for `*.storm1.<zone>`, the node's
+name and address from the node CA, and mounts tier-0 read-only into
+stormlb's container (stormcos#363). Once the pair loads, `:80` answers 308
+to `https` (`/healthz` excepted, for stormd's probe). A routed host's own
 authentication is its backend's.
 
 **Health:** the router's `/healthz` (above), the API's `/healthz`, and the
@@ -449,6 +451,11 @@ again.
   ```toml
   [router]
   listen = "auto:80"
+  backend_ca_file = "/data/stormcert/ca.crt"
+  ca_file = "/data/stormcert/ca.crt"
+
+  [router.tls]
+  certs = [{ cert_file = "/data/stormcert/router.crt", key_file = "/data/stormcert/router.key" }]
 
   [api]
   state_file = "/var/lib/stormlb/vips.json"
@@ -594,12 +601,10 @@ makes the Job.
 
 What the code does not do yet, which older docs implied it did:
 
-- [#21](https://github.com/glennswest/stormlb/issues/21): the golden's
-  config doesn't set `token_file`, `ca_file`, `backend_ca_file` or
-  `[router.tls]` yet. They need stormlb's ServiceAccount token
-  (stormcos#76 step 2) and `/data/stormcert` mounted into its container
-  (stormcos#363), so the shipped router still reads anonymously, against
-  sno and bastion only.
+- [#33](https://github.com/glennswest/stormlb/issues/33): the golden's
+  config doesn't set `token_file` yet. It needs stormlb's ServiceAccount
+  token (stormcos#76 step 2), so the shipped router still reads
+  anonymously, against sno and bastion only.
 - [stormcluster#35](https://github.com/glennswest/stormcluster/issues/35):
   a cluster's API VIP can't listen on `:6443` on a master, because the
   apiserver binds `0.0.0.0:6443` there. The VIP's port is stormcluster's
@@ -608,12 +613,9 @@ What the code does not do yet, which older docs implied it did:
   (stormcos#81 allows nothing else off-node, which is why it is loopback).
 - Metrics count the first request of each keep-alive connection only (the
   router splices after the first head).
-- `backend_ca_file` isn't set in the golden: stormlb's container doesn't
-  mount `/data/stormcert` yet (stormcos#363), so an https route fails closed
-  on a node until it does.
-- [stormcos#363](https://github.com/glennswest/stormcos/issues/363): the
-  router can terminate TLS, but no node mints its certificate or mounts it
-  into stormlb's container yet, so the golden serves plain `:80` only.
+- [stormcert#69](https://github.com/glennswest/stormcert/issues/69):
+  stormcert can't renew the router's wildcard pair (it re-issues it on
+  every pass), so stormcos's renew check skips `router.crt` until then.
 - Earlier follow-ups: 4-octet ASNs and multiprotocol BGP. VRRP over IPv6
   is not implemented. VRRP's `CAP_NET_ADMIN` and `CAP_NET_RAW` come from
   stormpump keeping every capability for a container today. Once stormpump#47

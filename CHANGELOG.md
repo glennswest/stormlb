@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### 2026-11-07
+- **feat:** the shipped config (stormcentral registry) turns on
+  `[router.tls]` with stormcos's `/data/stormcert/router.{crt,key}`
+  (`*.storm1.<zone>`, stormcos#363). It also sets `[router] ca_file` to the
+  node CA, so the apiserver is verified instead of accepted unverified
+  (#21). `:80` now 308s to https once the pair loads. `token_file` waits on
+  stormcos#76 (#33).
+- **test:** `parses_the_shipped_router_config` parses that `[router]`,
+  `[router.tls]`, `[api]` and `[metrics]` text with stormlb's own `Config`.
+- **docs:** README (router, ports, how it ships, gaps), design.md and the
+  deck describe TLS and the apiserver CA as shipped. The stormcos#363 and
+  "not mounted" gaps are gone, and stormcert#69 (the wildcard pair isn't
+  renewed) is new.
+
 ### 2026-10-07
 - **docs:** the registry entry is stormcentral's database (`component
   export`/`edit`), not `components/stormcos.toml`, which is only the seed

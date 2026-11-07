@@ -83,7 +83,7 @@ Router only if there is no `[vip]`. Otherwise the L4 balancer runs in the foregr
   1. the `storm.io/backend` annotation, `host:port` verbatim (`127.0.0.1:9094` = "this node's console" on every node)
   2. otherwise the first `backendRef`, resolved to the Service's `clusterIP:port`
 - **Survives the apiserver:** a failed poll keeps the last good table.
-- **Its identity:** `token_file` (its ServiceAccount's bearer token, re-read each poll) and `ca_file` (the apiserver verified against the cluster CA) (#9, #10). The golden doesn't set them until stormcos mints the token and mounts `/data/stormcert` (#21), so it still reads anonymously, on sno and bastion.
+- **Its identity:** `token_file` (its ServiceAccount's bearer token, re-read each poll) and `ca_file` (the apiserver verified against the cluster CA) (#9, #10). The golden sets `ca_file` (#21); `token_file` waits on stormcos minting the token (#33, stormcos#76), so it still reads anonymously, on sno and bastion.
 - **Its own answers:** `400` with no Host, `404 no route for host <h>`, `200 router alive` for `/healthz` on an unclaimed host.
 - **`listen = "auto:80"`** binds the node's routable IPv4 plus loopback, not `0.0.0.0`, because stormimds holds `169.254.169.254:80`.
 
@@ -105,9 +105,9 @@ Unit-tested; `tests/balancer.rs` drives round-robin and failover through the rea
 
 | | Status |
 |---|---|
-| Router credentials for the apiserver, and a CA file to verify it | **done** (#9, #10); set in the golden with #21 |
-| TLS on `:443` (`[router.tls]`: SNI, reload, 308 from `:80`) | **done** (#14); not in the golden until stormcos#363 mints and mounts the wildcard |
-| TLS to HTTPS-only backends (stormcos#81) | **done** (#13): `storm.io/backend-protocol: https`, verified against `backend_ca_file`; the golden sets it once stormcos#363 mounts the CA |
+| Router credentials for the apiserver, and a CA file to verify it | **done** (#9, #10); CA in the golden (#21), token with #33 |
+| TLS on `:443` (`[router.tls]`: SNI, reload, 308 from `:80`) | **done** (#14); on in the golden (#21) with stormcos#363's pair |
+| TLS to HTTPS-only backends (stormcos#81) | **done** (#13): `storm.io/backend-protocol: https`, verified against `backend_ca_file`, set in the golden (the node CA) |
 | Running the test container on test machines | runner shipped (`stormcentral test run`); `test/requires.toml` declares `host_network` (all suites) and the `nodes` read (`long`), `test/build.sh` builds the binary: **ready, not yet run on a test machine** |
 | 4-octet ASNs, MP-BGP, IPv6 | follow-ups |
 | Wildcard hosts, path/header matches, 502 on a dead backend | not done (router) |
@@ -143,7 +143,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 | Port | What |
 |---|---|
 | **80** (router `listen`) | plain HTTP/1.x, no auth, from clients via `*.storm1.<zone>`; stormd's probe on `127.0.0.1:80/healthz`; 308 to https once a certificate is loaded |
-| **443** (`[router.tls] listen`) | TLS, then the same demux; not in the golden until stormcos#363 |
+| **443** (`[router.tls] listen`) | TLS, then the same demux; `:80` 308s to it |
 | `[vip] port`, e.g. 6443, and each API VIP's port | kube-api clients via the VIP (not 6443 on a master: stormcluster#35) |
 | **127.0.0.1:9103** (`[api]`) | the VIP API, for stormcluster on the node |
 | **9104** (`[metrics]`) | Prometheus `/metrics`: requests by host and code, latency, upstream errors, connections, reloads, VIP health, `process_*` (#12) |
@@ -159,7 +159,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 ## How it ships and is operated
 
 - **Golden kind:** stormcentral `service`, a 32 MiB `stormlb` golden on pallet `system1`. It holds the static musl `/usr/sbin/stormlb` in a stormd base, plus `stormlb-data` (`/var/lib/stormlb`) and `stormlb-logs` (`/var/log/stormd`).
-- **Baked config:** `[router] listen = "auto:80"`, `[api] state_file = "/var/lib/stormlb/vips.json"` (API on `127.0.0.1:9103`), and `[metrics] listen = "auto:9104"`.
+- **Baked config:** `[router] listen = "auto:80"` with `ca_file` and `backend_ca_file` = the node CA, `[router.tls]` with stormcos's `router.crt`/`router.key` (TLS on `auto:443`, `:80` 308s), `[api] state_file = "/var/lib/stormlb/vips.json"` (API on `127.0.0.1:9103`), and `[metrics] listen = "auto:9104"`.
 - **How it starts:** no systemd; stormpump is PID 1. stormcos `build-goldens.sh` writes a `spec stormlb` stanza into `boot.d/40-services`: a container on the host network profile, sharing UTS. On the **sno** and **bastion** profiles it also writes `start stormlb`. stormd then runs it with `--config /etc/stormlb/stormlb.toml`, restarts it on exit and probes `/healthz`.
 - **How it is updated:** push → `sc-build` on a fresh build VM → `stormcentral component build stormlb`. That builds an immutable golden from the exact commit (`--release --locked`, musl) and files a stormcos release request. A stormcos release then carries the new golden to nodes.
 
@@ -174,8 +174,8 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 
 **Open issues that matter**
 
-- stormcos#363: the router's certificate isn't minted, and `/data/stormcert` isn't mounted, so the golden serves plain `:80` and https routes fail closed (stormcos#81)
-- #21: the golden's router reads anonymously until stormcos mints its token and mounts `/data/stormcert` (stormcos#76, #363)
+- #33: the golden's router reads anonymously until stormcos mints its token (stormcos#76)
+- stormcert#69: the router's wildcard pair isn't renewed yet
 
 ---
 
