@@ -353,3 +353,18 @@ deliberate commit of its own.
       #25 (harness long wave flake), #26 (per-connection routing/metrics),
       #27 (test/ headers vs stormcentral#121 option B), #28 (VIP port decided,
       docs stale), all P3. Everything cross-component was already filed.
+- [ ] #21 (2026-11-07) shipped config: what the node now provides.
+      stormcos#363 is closed and validated (12.58 lineage): stormcos
+      `stormcert-serving-router` mints `/data/stormcert/router.{crt,key}`
+      (`*.storm1.g8.lo`, node name/address, localhost, 127.0.0.1) from the
+      node CA, and tier-0 is mounted read-only into stormlb (#352);
+      `backend_ca_file` is already in the registry config. The apiserver's
+      certificate carries IP 127.0.0.1 from the same CA, so `ca_file` can be
+      set too. `token_file` still waits on stormcos#76 step 2 (open).
+  - [ ] Registry config gains `ca_file` and `[router.tls] certs =
+        [router.crt/key]`: the master runs the `component edit` (our token
+        can't, #829); `stormcentral note` with the file and why.
+  - [ ] token_file split into its own issue, proposed after stormcos#76.
+  - [ ] Docs (README router/how it ships/gaps, design.md, deck), CHANGELOG.
+  - [ ] sc-build, then (once the registry has it) golden; `shipped` #21 with
+        a proof on the node.
