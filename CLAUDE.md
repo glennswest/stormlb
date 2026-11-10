@@ -375,16 +375,21 @@ deliberate commit of its own.
         every integration test, clippy and cargo doc -D warnings.
   - [ ] Then (once the registry has it) golden; `shipped` #21 with
         a proof on the node.
-- [ ] #30 (P1) ports: `[api]` 9103 is sectionsystems', `[metrics]` 9104 is
+- [x] #30 (P1) ports: `[api]` 9103 is sectionsystems', `[metrics]` 9104 is
       stormblock-csi's (stormcos#65); both bind the wildcard on the host
       network. Registry free 9109–9119; 9110 is stormcentral's own default.
   - [x] Defaults → api 127.0.0.1:9109, metrics auto:9111; the shipped-config
         test, vrrp-netns.sh, README (ports table + why), design, deck,
         example, CHANGELOG.
-  - [ ] Registry: tmp/stormlb-component.toml (also carries #21's ca_file
+  - [x] Registry: tmp/stormlb-component.toml (also carries #21's ca_file
         and [router.tls]) sets both listens explicitly; `stormcentral note`
         the master to `component edit stormlb --file` it. Sent 2026-11-10
         (supersedes the #21 note; full TOML in the note).
   - [x] Tell stormcluster (`stormlb_url` default) and stormcos (#367
         ports table, METRICS.md, check-metrics, ironprom-node.yml): stormcluster#110, stormcos#909.
-  - [ ] sc-build, comment the ports on #30, golden, close.
+  - [x] sc-build passed at e8dee08 (release, 43 unit + every integration,
+        clippy/doc -D warnings, vrrp-netns on :9109, test crate 12 + 3).
+        Commented on #30; golden build 2d03e5032e58 at 22c5dc4; `shipped`
+        with proof `get:http://{node}:9111/metrics ~ stormlb_build_info`
+        (holds only once the master applies the registry edit: until then
+        the registry config still says metrics auto:9104).
