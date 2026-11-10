@@ -383,7 +383,8 @@ deliberate commit of its own.
         example, CHANGELOG.
   - [ ] Registry: tmp/stormlb-component.toml (also carries #21's ca_file
         and [router.tls]) sets both listens explicitly; `stormcentral note`
-        the master to `component edit stormlb --file` it.
-  - [ ] Tell stormcluster (`stormlb_url` default) and stormcos (#367
-        ports table, METRICS.md, check-metrics, ironprom-node.yml): issues.
+        the master to `component edit stormlb --file` it. Sent 2026-11-10
+        (supersedes the #21 note; full TOML in the note).
+  - [x] Tell stormcluster (`stormlb_url` default) and stormcos (#367
+        ports table, METRICS.md, check-metrics, ironprom-node.yml): stormcluster#110, stormcos#909.
   - [ ] sc-build, comment the ports on #30, golden, close.
