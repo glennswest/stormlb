@@ -48,8 +48,9 @@ pub struct ApiCfg {
     #[serde(default)]
     pub state_file: Option<String>,
 }
+// 9109: free in stormcentral's registry; 9103 is sectionsystems' (#30).
 fn default_api_listen() -> String {
-    "127.0.0.1:9103".to_string()
+    "127.0.0.1:9109".to_string()
 }
 
 /// The virtual IP fronted by this balancer, and where the L4 proxy listens.
@@ -253,10 +254,11 @@ ca_file = "/data/stormcert/ca.crt"
 certs = [{ cert_file = "/data/stormcert/router.crt", key_file = "/data/stormcert/router.key" }]
 
 [api]
+listen = "127.0.0.1:9109"
 state_file = "/var/lib/stormlb/vips.json"
 
 [metrics]
-listen = "auto:9104"
+listen = "auto:9111"
 "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         let r = cfg.router.unwrap();
@@ -271,13 +273,18 @@ listen = "auto:9104"
         assert_eq!(t.certs.len(), 1);
         assert_eq!(t.certs[0].cert_file, "/data/stormcert/router.crt");
         assert_eq!(t.certs[0].key_file, "/data/stormcert/router.key");
+        // #30: off sectionsystems' 9103 and stormblock-csi's 9104.
+        let api = cfg.api.unwrap();
+        assert_eq!(api.listen, "127.0.0.1:9109");
+        assert_eq!(api.state_file.as_deref(), Some("/var/lib/stormlb/vips.json"));
+        assert_eq!(cfg.metrics.unwrap().listen, "auto:9111");
     }
 
     #[test]
     fn api_defaults_to_loopback_with_no_token_or_state() {
         let cfg: Config = toml::from_str("[api]\n").unwrap();
         let api = cfg.api.unwrap();
-        assert_eq!(api.listen, "127.0.0.1:9103");
+        assert_eq!(api.listen, "127.0.0.1:9109");
         assert!(api.token_file.is_none() && api.state_file.is_none());
         assert!(cfg.vip.is_none() && cfg.router.is_none());
     }

@@ -44,13 +44,13 @@ ns "$NB" ip link set lo up; ns "$NB" ip addr add 10.9.0.2/24 dev vb; ns "$NB" ip
 # Let a gratuitous ARP create a neighbour entry, so check 3 can see it.
 ns "$NA" sh -c 'echo 1 > /proc/sys/net/ipv4/conf/va/arp_accept' 2>/dev/null || echo "note: arp_accept not settable"
 
-printf '[api]\nlisten = "127.0.0.1:9103"\n' > "$W/stormlb.toml"
+printf '[api]\nlisten = "127.0.0.1:9109"\n' > "$W/stormlb.toml"
 
 # One API request inside a namespace: prints the body; status in $W/status.
 api() {
     local p=$1 method=$2 path=$3 body=${4:-}
     ns "$p" bash -c '
-        exec 3<>/dev/tcp/127.0.0.1/9103
+        exec 3<>/dev/tcp/127.0.0.1/9109
         printf "%s %s HTTP/1.1\r\nhost: x\r\ncontent-length: %d\r\n\r\n%s" "$1" "$2" "${#3}" "$3" >&3
         cat <&3' _ "$method" "$path" "$body" > "$W/resp"
     sed -n '1s/^HTTP\/1.1 \([0-9]*\).*/\1/p' "$W/resp" > "$W/status"
@@ -75,12 +75,12 @@ within() {
 start() { # name pid iface
     ns "$2" "$BIN" --config "$W/stormlb.toml" > "$W/$1.log" 2>&1 &
     pids+=("$!")
-    within 5 ns "$2" bash -c 'exec 3<>/dev/tcp/127.0.0.1/9103' > /dev/null || fail "stormlb $1 API did not come up"
+    within 5 ns "$2" bash -c 'exec 3<>/dev/tcp/127.0.0.1/9109' > /dev/null || fail "stormlb $1 API did not come up"
 }
 
 # 1. A alone takes the VIP after master-down (3.6 s at priority 100).
 start a "$NA" va
-api "$NA" PUT /api/v1/vips/api "$(spec va 100 9103)" > /dev/null
+api "$NA" PUT /api/v1/vips/api "$(spec va 100 9109)" > /dev/null
 [ "$(cat "$W/status")" = 201 ] || fail "A: PUT answered $(cat "$W/status")"
 ms=$(within 8 holds "$NA" va) || fail "A never took the VIP"
 pass "A (100) took the VIP after ${ms} ms"
@@ -88,7 +88,7 @@ api "$NA" GET /api/v1/vips/api | grep -q '"vrrp":"master"' || fail "A's API does
 
 # 2. B (200) starts and preempts.
 start b "$NB" vb
-api "$NB" PUT /api/v1/vips/api "$(spec vb 200 9103)" > /dev/null
+api "$NB" PUT /api/v1/vips/api "$(spec vb 200 9109)" > /dev/null
 ms=$(within 8 holds "$NB" vb) || fail "B (200) never preempted A (100)"
 within 2 not_holds "$NA" va > /dev/null || fail "A kept the VIP after B took it"
 pass "B (200) preempted A in ${ms} ms; A released it"
@@ -111,7 +111,7 @@ pass "B resigned on no healthy backend; A took the VIP ${ms} ms after the change
 api "$NB" GET /api/v1/vips/api | grep -q '"healthy":0' || fail "B's API does not show 0 healthy"
 
 # 5. B's backend is back: B preempts again.
-api "$NB" PUT /api/v1/vips/api "$(spec vb 200 9103)" > /dev/null
+api "$NB" PUT /api/v1/vips/api "$(spec vb 200 9109)" > /dev/null
 ms=$(within 8 holds "$NB" vb) || fail "B did not preempt back once healthy"
 pass "B healthy again: preempted back in ${ms} ms"
 within 2 not_holds "$NA" va > /dev/null || fail "A kept the VIP after B took it back"

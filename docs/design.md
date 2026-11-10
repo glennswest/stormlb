@@ -145,7 +145,7 @@ and the time to first byte, while the client→backend half keeps copying, so
 an upload is never held behind a response that waits for it. The `host`
 label is a route's hostname or `unrouted`, never the client's Host header,
 so a scanner can't grow the series set. Metrics have their own port
-(`:9104`), because `/metrics` on `:80` is a routable path.
+(`:9111`), because `/metrics` on `:80` is a routable path.
 
 TLS is now a requirement, not an option: stormcos#81 has every node listener
 serve TLS with a stormcert certificate and authenticate. The router

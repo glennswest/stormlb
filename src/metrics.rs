@@ -29,8 +29,10 @@ pub struct MetricsCfg {
     #[serde(default = "default_listen")]
     pub listen: String,
 }
+// 9111: free in stormcentral's registry; 9104 is stormblock-csi's and 9110
+// stormcentral's own (#30).
 fn default_listen() -> String {
-    "auto:9104".into()
+    "auto:9111".into()
 }
 
 /// Histogram buckets (seconds).

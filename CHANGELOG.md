@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### 2026-11-10
+- **BREAKING:** default ports moved off other components' registered ones
+  (#30, stormcos#65): `[api] listen` 127.0.0.1:9103 → **127.0.0.1:9109**
+  (9103 is sectionsystems', bound 0.0.0.0 on the host network) and
+  `[metrics] listen` auto:9104 → **auto:9111** (9104 is stormblock-csi's;
+  9110 is stormcentral's own). Whichever started second crash-looped on
+  EADDRINUSE. The shipped config sets both explicitly; callers of the VIP
+  API (stormcluster's `stormlb_url`) and scrapers of `/metrics` (stormcos
+  ironprom-node.yml, check-metrics.sh) move with it.
+
 ### 2026-11-07
 - **feat:** the shipped config (stormcentral registry) turns on
   `[router.tls]` with stormcos's `/data/stormcert/router.{crt,key}`

@@ -100,7 +100,7 @@ exists because `0.0.0.0:80` includes `169.254.169.254:80`, which stormimds
 
 | Key | Default | Meaning |
 |---|---|---|
-| `listen` | `"127.0.0.1:9103"` | Where the [VIP API](#vip-api) listens. A non-loopback address needs `token_file`, or stormlb refuses to start: whoever reaches the API can point a VIP anywhere. |
+| `listen` | `"127.0.0.1:9109"` | Where the [VIP API](#vip-api) listens. A non-loopback address needs `token_file`, or stormlb refuses to start: whoever reaches the API can point a VIP anywhere. |
 | `token_file` | none | A file holding the bearer token every `/api/v1` request must send (`Authorization: Bearer <token>`). It is re-read on every request, so it can be rotated in place. `/healthz` needs no token. |
 | `state_file` | none | Where VIPs made through the API are saved (JSON, written atomically on every change) and read back at start, so they serve again after a restart before anyone re-applies them. Unset: they live in memory only. |
 
@@ -108,7 +108,7 @@ exists because `0.0.0.0:80` includes `169.254.169.254:80`, which stormimds
 
 | Key | Default | Meaning |
 |---|---|---|
-| `listen` | `"auto:9104"` | Where `GET /metrics` is served (also `GET /healthz`; anything else is a 404, a non-GET a 405). `auto:<port>` binds the node's address and loopback, as for `[router] listen`: the node's ironprom scrapes loopback, and stormcos's `check-metrics.sh` probes from off the node. Plain HTTP, read-only, no token, like the other node metrics listeners. If it can't be bound it is logged and everything else runs. |
+| `listen` | `"auto:9111"` | Where `GET /metrics` is served (also `GET /healthz`; anything else is a 404, a non-GET a 405). `auto:<port>` binds the node's address and loopback, as for `[router] listen`: the node's ironprom scrapes loopback, and stormcos's `check-metrics.sh` probes from off the node. Plain HTTP, read-only, no token, like the other node metrics listeners. If it can't be bound it is logged and everything else runs. |
 
 The series are in [Metrics](#metrics).
 
@@ -379,11 +379,17 @@ advertises the same /32, so the upstream router ECMP-hashes across them.
 | `[router] listen`: **80** in the golden | TCP, plain HTTP/1.x, no auth; 308 to https once a `[router.tls]` pair loads (the golden) | clients via `*.storm1.<zone>`; stormd's liveness probe on `127.0.0.1:80/healthz` | `[router]` present |
 | `[router.tls] listen`: **443** | TLS 1.2/1.3, then HTTP/1.x | clients via `*.storm1.<zone>` | `[router.tls]` present (the golden: `auto:443`, the router's pair from stormcos#363) |
 | `[vip] port`, e.g. 6443, and each API VIP's `port` | TCP | kube-api clients via the VIP | `[vip]` present, or a VIP made through the API |
-| `[metrics] listen`: **9104** (`auto`: node address and loopback) | plain HTTP, read-only, no token | ironprom on the node; stormcos `check-metrics.sh` | `[metrics]` present |
-| `[api] listen`: **127.0.0.1:9103** by default | plain HTTP, JSON; a bearer token with `token_file` | stormcluster, on the same node | `[api]` present |
+| `[metrics] listen`: **9111** (`auto`: node address and loopback) | plain HTTP, read-only, no token | ironprom on the node; stormcos `check-metrics.sh` | `[metrics]` present |
+| `[api] listen`: **127.0.0.1:9109** by default | plain HTTP, JSON; a bearer token with `token_file` | stormcluster, on the same node | `[api]` present |
 | n/a | IP proto 112 to `224.0.0.18` | VRRP peers | `[vrrp] enabled` |
 | 179 (outbound only) | TCP | BGP peers | `[bgp] enabled` |
 | 180 in the golden | plain HTTP, no auth | **stormd's** API, not stormlb's (port + 100, stormcentral's convention). Its TLS and auth are stormd#32. | golden |
+
+9109 and 9111 are free in stormcentral's registry (#30): until 2026-11-10
+the API defaulted to 9103 and metrics to 9104, which are sectionsystems' and
+stormblock-csi's registered ports. Both bind the wildcard on the host network,
+so whichever started second crash-looped on EADDRINUSE. 9110 is skipped: it is
+stormcentral's own API port.
 
 stormcos#81 requires every listener on a node to be TLS with a stormcert
 certificate and to authenticate, health probes excepted. The router can
@@ -401,7 +407,7 @@ from `[vip]` without `[api]` shows them only in the logs (and `ip addr`).
 
 ### Metrics
 
-`[metrics]` serves Prometheus text (format 0.0.4) on `:9104/metrics` (#12,
+`[metrics]` serves Prometheus text (format 0.0.4) on `:9111/metrics` (#12,
 for stormcos#64). `GET /metrics` on `:80` is still routing: the 404 for an
 unclaimed host, or the backend of a claimed one. Only series that have
 happened are printed.
@@ -446,7 +452,7 @@ again.
   `stormlb-data` (64 MiB, `data1`, at `/var/lib/stormlb`) and `stormlb-logs`
   (64 MiB, `system1`, at `/var/log/stormd`).
 - The config baked into the golden is the **router, the VIP API** (on
-  loopback, saving its VIPs on the data volume) **and metrics** on `:9104`:
+  loopback, saving its VIPs on the data volume) **and metrics** on `:9111`:
 
   ```toml
   [router]
@@ -458,10 +464,11 @@ again.
   certs = [{ cert_file = "/data/stormcert/router.crt", key_file = "/data/stormcert/router.key" }]
 
   [api]
+  listen = "127.0.0.1:9109"
   state_file = "/var/lib/stormlb/vips.json"
 
   [metrics]
-  listen = "auto:9104"
+  listen = "auto:9111"
   ```
 
 - stormcentral builds the golden from an exact pushed commit with
@@ -585,7 +592,7 @@ makes the Job.
 - **Not read by the suites yet:** the router's own memory and file
   descriptors. stormd's open `/metrics` reports stormd's, not the process it
   supervises (stormd#33). Since #12 the router reports its own `process_*`
-  on `:9104/metrics`, but the long suite's residue check doesn't read them
+  on `:9111/metrics`, but the long suite's residue check doesn't read them
   yet.
 - **The harness:** `test/tests/harness.rs` runs the three suites against the
   real router (`stormlb::router::run`) and a small in-memory apiserver, all

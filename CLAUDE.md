@@ -375,3 +375,15 @@ deliberate commit of its own.
         every integration test, clippy and cargo doc -D warnings.
   - [ ] Then (once the registry has it) golden; `shipped` #21 with
         a proof on the node.
+- [ ] #30 (P1) ports: `[api]` 9103 is sectionsystems', `[metrics]` 9104 is
+      stormblock-csi's (stormcos#65); both bind the wildcard on the host
+      network. Registry free 9109–9119; 9110 is stormcentral's own default.
+  - [x] Defaults → api 127.0.0.1:9109, metrics auto:9111; the shipped-config
+        test, vrrp-netns.sh, README (ports table + why), design, deck,
+        example, CHANGELOG.
+  - [ ] Registry: tmp/stormlb-component.toml (also carries #21's ca_file
+        and [router.tls]) sets both listens explicitly; `stormcentral note`
+        the master to `component edit stormlb --file` it.
+  - [ ] Tell stormcluster (`stormlb_url` default) and stormcos (#367
+        ports table, METRICS.md, check-metrics, ironprom-node.yml): issues.
+  - [ ] sc-build, comment the ports on #30, golden, close.
