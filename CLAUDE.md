@@ -374,7 +374,11 @@ deliberate commit of its own.
   - [x] sc-build passed at 0b6d496 on a build VM: release build, 43 unit +
         every integration test, clippy and cargo doc -D warnings.
   - [ ] Then (once the registry has it) golden; `shipped` #21 with
-        a proof on the node.
+        a proof on the node (`log:router TLS: loaded /data/stormcert/router.crt`).
+        2026-11-10: export still lacked it; parked with `wait-owner --action
+        "component edit stormlb --file …/tmp/stormlb-component-21-30.toml"`
+        (that file also carries #30's ports). On Done: re-check export,
+        `component build stormlb --no-wait`, `shipped`.
 - [x] #30 (P1) ports: `[api]` 9103 is sectionsystems', `[metrics]` 9104 is
       stormblock-csi's (stormcos#65); both bind the wildcard on the host
       network. Registry free 9109–9119; 9110 is stormcentral's own default.
