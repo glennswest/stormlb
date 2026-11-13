@@ -407,5 +407,9 @@ deliberate commit of its own.
         apis to tmp/stormlb-component-21-30.toml too (its `--file` replaces
         every field), and `stormcentral note` the master the `--set apis=…`.
   - [x] README (ports/health, how it ships), deck, CHANGELOG.
-  - [ ] sc-build (docs only), golden once `component export` shows apis,
-        close #32.
+  - [x] sc-build passed at 5df3341 (release, 43 unit + every integration,
+        cargo doc -D warnings). Commented on #32.
+  - [ ] 2026-11-13: export lacks apis; parked with `wait-owner --action`
+        (the `--set apis=…` command). On Done: re-check export, then
+        `component build stormlb --url http://stormcentral.g8.lo`, close #32
+        (or `shipped` with proof `log:.*router.*healthy` if one fits).
