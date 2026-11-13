@@ -142,7 +142,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 
 | Port | What |
 |---|---|
-| **80** (router `listen`) | plain HTTP/1.x, no auth, from clients via `*.storm1.<zone>`; stormd's probe on `127.0.0.1:80/healthz`; 308 to https once a certificate is loaded |
+| **80** (router `listen`) | plain HTTP/1.x, no auth, from clients via `*.storm1.<zone>`; liveness on `127.0.0.1:80/healthz`; 308 to https once a certificate is loaded |
 | **443** (`[router.tls] listen`) | TLS, then the same demux; `:80` 308s to it |
 | `[vip] port`, e.g. 6443, and each API VIP's port | kube-api clients via the VIP (not 6443 on a master: stormcluster#35) |
 | **127.0.0.1:9109** (`[api]`) | the VIP API, for stormcluster on the node |
@@ -151,7 +151,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 | 179, outbound only | BGP peers |
 | 180 | **stormd's** API in the golden, not stormlb's; plain, no auth (stormd#32) |
 
-- **Health:** the router's `/healthz`, the API's `/healthz`, and each VIP's backends and VRRP state in `GET /api/v1/vips`.
+- **Health:** `/healthz` for the pod's liveness; stormd probes three APIs (#32), `router` (:80), `vips` (:9109) and `metrics` (:9111): healthy, slow, stalled or down.
 - **Metrics:** `:9111/metrics` (#12): router requests by host and code, time to first byte, upstream errors, connections, route and certificate reloads, VIP connections and backend health, and the process's own memory, fds and CPU. stormd's `:180` still reports state and restarts.
 
 ---
@@ -160,7 +160,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 
 - **Golden kind:** stormcentral `service`, a 32 MiB `stormlb` golden on pallet `system1`. It holds the static musl `/usr/sbin/stormlb` in a stormd base, plus `stormlb-data` (`/var/lib/stormlb`) and `stormlb-logs` (`/var/log/stormd`).
 - **Baked config:** `[router] listen = "auto:80"` with `ca_file` and `backend_ca_file` = the node CA, `[router.tls]` with stormcos's `router.crt`/`router.key` (TLS on `auto:443`, `:80` 308s), `[api] state_file = "/var/lib/stormlb/vips.json"` (API on `127.0.0.1:9109`), and `[metrics] listen = "auto:9111"`.
-- **How it starts:** no systemd; stormpump is PID 1. stormcos `build-goldens.sh` writes a `spec stormlb` stanza into `boot.d/40-services`: a container on the host network profile, sharing UTS. On the **sno** and **bastion** profiles it also writes `start stormlb`. stormd then runs it with `--config /etc/stormlb/stormlb.toml`, restarts it on exit and probes `/healthz`.
+- **How it starts:** no systemd; stormpump is PID 1. stormcos `build-goldens.sh` writes a `spec stormlb` stanza into `boot.d/40-services`: a container on the host network profile, sharing UTS. On the **sno** and **bastion** profiles it also writes `start stormlb`. stormd then runs it with `--config /etc/stormlb/stormlb.toml`, restarts it on exit and probes its APIs.
 - **How it is updated:** push → `sc-build` on a fresh build VM → `stormcentral component build stormlb`. That builds an immutable golden from the exact commit (`--release --locked`, musl) and files a stormcos release request. A stormcos release then carries the new golden to nodes.
 
 ---

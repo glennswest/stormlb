@@ -397,3 +397,15 @@ deliberate commit of its own.
         with proof `get:http://{node}:9111/metrics ~ stormlb_build_info`
         (holds only once the master applies the registry edit: until then
         the registry config still says metrics auto:9104).
+- [ ] #32 (P0) API health declarations (stormcentral#596, stormd#49).
+      Registry `apis` (stormd probes, `[[process.api]]` in the golden):
+      `router` /healthz on :80 (accept, head parse, route-table lock; 20/250
+      ms, 5 s), `vips` http://127.0.0.1:9109/api/v1/vips (50/500 ms, 10 s),
+      `metrics` http://127.0.0.1:9111/metrics (100/1000 ms, 10 s); no
+      restart_after_stalled_secs (a restart drops VRRP mastership).
+  - [x] Our token can neither check nor edit the registry (#829): added the
+        apis to tmp/stormlb-component-21-30.toml too (its `--file` replaces
+        every field), and `stormcentral note` the master the `--set apis=…`.
+  - [x] README (ports/health, how it ships), deck, CHANGELOG.
+  - [ ] sc-build (docs only), golden once `component export` shows apis,
+        close #32.

@@ -376,7 +376,7 @@ advertises the same /32, so the upstream router ECMP-hashes across them.
 
 | Port | Proto | Who | When |
 |---|---|---|---|
-| `[router] listen`: **80** in the golden | TCP, plain HTTP/1.x, no auth; 308 to https once a `[router.tls]` pair loads (the golden) | clients via `*.storm1.<zone>`; stormd's liveness probe on `127.0.0.1:80/healthz` | `[router]` present |
+| `[router] listen`: **80** in the golden | TCP, plain HTTP/1.x, no auth; 308 to https once a `[router.tls]` pair loads (the golden) | clients via `*.storm1.<zone>`; the pod's liveness probe and stormd's `router` API probe on `127.0.0.1:80/healthz` | `[router]` present |
 | `[router.tls] listen`: **443** | TLS 1.2/1.3, then HTTP/1.x | clients via `*.storm1.<zone>` | `[router.tls]` present (the golden: `auto:443`, the router's pair from stormcos#363) |
 | `[vip] port`, e.g. 6443, and each API VIP's `port` | TCP | kube-api clients via the VIP | `[vip]` present, or a VIP made through the API |
 | `[metrics] listen`: **9111** (`auto`: node address and loopback) | plain HTTP, read-only, no token | ironprom on the node; stormcos `check-metrics.sh` | `[metrics]` present |
@@ -402,6 +402,23 @@ authentication is its backend's.
 
 **Health:** the router's `/healthz` (above), the API's `/healthz`, and the
 metrics listener's `/healthz`.
+
+**API health** (#32, stormcentral#596): the registry declares three APIs,
+and stormd probes each inside the container every 15 s, sorting it into
+healthy, slow (over budget), stalled (no answer within the timeout) or down
+(refused, or a status of 400 or more). The node's summary
+(`/run/stormpump/health.d/stormlb.json`) carries them, and a test run on a
+node where one is stalled or down reports infrastructure, not a failure.
+
+| API | Probe | p50 / p99 | Timeout | What it exercises |
+|---|---|---|---|---|
+| `router` | `http://127.0.0.1:80/healthz` | 20 / 250 ms | 5 s | The router's accept loop, the request-head parse and the route-table read lock that every request takes. 127.0.0.1 is never a route's hostname, so the router answers itself instead of a backend. A routed request's only other step is the backend's own dial, which no probe can make without a route. |
+| `vips` | `http://127.0.0.1:9109/api/v1/vips` | 50 / 500 ms | 10 s | The VIP registry (the lock `PUT`/`DELETE` take), with each VIP's backend health and VRRP state. |
+| `metrics` | `http://127.0.0.1:9111/metrics` | 100 / 1000 ms | 10 s | The full render ironprom scrapes: every counter, and the VIPs' health and VRRP state at scrape time. |
+
+None sets `restart_after_stalled_secs`: a restart drops VRRP mastership and
+every open connection, so a stall is reported, not acted on. The ports are
+the defaults since #30, and the shipped config sets them explicitly.
 Each VIP's backends' health and VRRP state are in `GET /api/v1/vips`; a VIP
 from `[vip]` without `[api]` shows them only in the logs (and `ip addr`).
 
@@ -448,7 +465,9 @@ again.
 - `kind = "service"`: a `stormlb` golden (32 MiB, pallet `system1`) with the
   static musl binary at `/usr/sbin/stormlb` in a stormd base. stormd runs it
   as a process with `--config /etc/stormlb/stormlb.toml`, restarts it on
-  exit, and probes `http://127.0.0.1:80/healthz`. There are also
+  exit, and probes the three APIs the registry declares (`apis`, see
+  [Ports and endpoints](#ports-and-endpoints)). Liveness, `http://127.0.0.1:80/healthz`,
+  is the pod's probe (stormcentral#607). There are also
   `stormlb-data` (64 MiB, `data1`, at `/var/lib/stormlb`) and `stormlb-logs`
   (64 MiB, `system1`, at `/var/log/stormd`).
 - The config baked into the golden is the **router, the VIP API** (on

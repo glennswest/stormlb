@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### 2026-11-13
+- **chore:** API health declarations for the registry (#32,
+  stormcentral#596): `router` (`:80/healthz`, through the route-table
+  lock), `vips` (`:9109/api/v1/vips`) and `metrics` (`:9111/metrics`), each
+  with p50/p99 budgets and a timeout; no restart on stall. Sent to the
+  master as a `component edit` (our token cannot change the registry).
+- **docs:** README "Ports and endpoints" lists the three APIs and what each
+  probe exercises; "How it ships" says liveness is the pod's probe
+  (stormcentral#607) and stormd probes the APIs. Deck likewise.
+
 ### 2026-11-10
 - **BREAKING:** default ports moved off other components' registered ones
   (#30, stormcos#65): `[api] listen` 127.0.0.1:9103 → **127.0.0.1:9109**
