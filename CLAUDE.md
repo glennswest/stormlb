@@ -413,3 +413,7 @@ deliberate commit of its own.
         (the `--set apis=…` command). On Done: re-check export, then
         `component build stormlb --url http://stormcentral.g8.lo`, close #32
         (or `shipped` with proof `log:.*router.*healthy` if one fits).
+- [x] Docs refresh (2026-11-14, since 2026-11-07). Code changed only in
+      e8dee08 (ports, already documented). Fixed: VIP port 7443 / stormcluster
+      is the client (#28 text), gap #34 (stormfn 9109) listed. #28 can close
+      once pushed; open: #21, #32, #33, #34 (P?), #24-#27, #29.

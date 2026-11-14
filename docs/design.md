@@ -53,8 +53,8 @@ this cluster.
 **Binding.** A VIP's listener binds the VIP address with `IP_FREEBIND`, so
 every master listens before it holds the address, and a VRRP takeover needs
 no rebind. It can't share `:6443` with the apiserver's wildcard bind on the
-same node, which is why the VIP's port is stormcluster's choice
-(glennswest/stormcluster#35).
+same node, which is why stormcluster puts the cluster's VIP on its
+`endpoint.port` (default 7443, stormcluster#35) and fronts each master's `:6443`.
 
 **Persistence and access.** VIPs made through the API are saved to
 `state_file` and served again at start, so a stormlb restart doesn't wait for

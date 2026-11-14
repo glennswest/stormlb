@@ -144,7 +144,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 |---|---|
 | **80** (router `listen`) | plain HTTP/1.x, no auth, from clients via `*.storm1.<zone>`; liveness on `127.0.0.1:80/healthz`; 308 to https once a certificate is loaded |
 | **443** (`[router.tls] listen`) | TLS, then the same demux; `:80` 308s to it |
-| `[vip] port`, e.g. 6443, and each API VIP's port | kube-api clients via the VIP (not 6443 on a master: stormcluster#35) |
+| `[vip] port`, e.g. 6443, and each API VIP's port | kube-api clients via the VIP (7443 by default, stormcluster#35; not 6443 on a master) |
 | **127.0.0.1:9109** (`[api]`) | the VIP API, for stormcluster on the node |
 | **9111** (`[metrics]`) | Prometheus `/metrics`: requests by host and code, latency, upstream errors, connections, reloads, VIP health, `process_*` (#12) |
 | IP proto 112 → `224.0.0.18` | VRRP peers |
@@ -169,7 +169,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 
 - **Version** 0.1.0 (pre-1.0; `Cargo.toml` is the only version location).
 - **Shipping:** the router and the VIP API (loopback, `state_file` on the data volume), in every stormcos build that includes stormlb, and started on sno and bastion nodes.
-- **Not yet used:** no node serves a VIP until stormcluster makes one (stormcluster#10, and its port, stormcluster#35). On a single node the VIP is the node's own address, so nothing needs to float.
+- **Used by:** stormcluster (#10) makes the cluster's API VIP through the API, on port 7443 by default. On a single node the VIP is the node's own address, so nothing needs to float.
 - **Tests:** unit and integration tests (`cargo test --locked` through `sc-build`), plus the `test/` container: short, medium and long suites against the router on a node, proven by a hermetic harness. The suites declare what they need of the node in `test/requires.toml`; they have not yet run on a test machine.
 
 **Open issues that matter**

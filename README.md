@@ -297,8 +297,10 @@ Errors are `{"error": "…"}`: 400, 401 (no or wrong token), 404, 405, 409,
 
 **On a master, the VIP can't be on 6443.** The apiserver binds
 `0.0.0.0:6443`, and Linux won't bind `<vip>:6443` beside a wildcard
-listener, so the PUT is a 409. Which port the cluster's VIP uses is
-stormcluster's (glennswest/stormcluster#35).
+listener, so the PUT is a 409. stormcluster (the API's client, stormcluster#10)
+puts the cluster's VIP on its `endpoint.port` (default **7443**, never the
+apiserver's port) and fronts each master's `:6443`; the apiserver certificate
+needs the VIP among its SANs (stormcos#362).
 
 ### L4 balancer
 
@@ -389,7 +391,8 @@ advertises the same /32, so the upstream router ECMP-hashes across them.
 the API defaulted to 9103 and metrics to 9104, which are sectionsystems' and
 stormblock-csi's registered ports. Both bind the wildcard on the host network,
 so whichever started second crash-looped on EADDRINUSE. 9110 is skipped: it is
-stormcentral's own API port.
+stormcentral's own API port. **9109 is also stormfn's default** (`0.0.0.0:9109`,
+not yet a node service): once it is, whichever binds second fails (#34, open).
 
 stormcos#81 requires every listener on a node to be TLS with a stormcert
 certificate and to authenticate, health probes excepted. The router can
@@ -631,10 +634,9 @@ What the code does not do yet, which older docs implied it did:
   config doesn't set `token_file` yet. It needs stormlb's ServiceAccount
   token (stormcos#76 step 2), so the shipped router still reads
   anonymously, against sno and bastion only.
-- [stormcluster#35](https://github.com/glennswest/stormcluster/issues/35):
-  a cluster's API VIP can't listen on `:6443` on a master, because the
-  apiserver binds `0.0.0.0:6443` there. The VIP's port is stormcluster's
-  choice.
+- [#34](https://github.com/glennswest/stormlb/issues/34): the API's default
+  `127.0.0.1:9109` is stormfn's default port; the clash comes once stormfn
+  runs on nodes.
 - The API is plain HTTP on loopback, with an optional bearer token: no TLS
   (stormcos#81 allows nothing else off-node, which is why it is loopback).
 - Metrics count the first request of each keep-alive connection only (the

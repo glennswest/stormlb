@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 2026-11-14
+- **docs:** refreshed from the code (no code change since e8dee08): the
+  cluster API VIP is on stormcluster's `endpoint.port` (default 7443) and
+  stormcluster is the API's client (#28); the stormfn clash on 9109 is a
+  listed gap (#34).
+
 ### 2026-11-13
 - **chore:** API health declarations for the registry (#32,
   stormcentral#596): `router` (`:80/healthz`, through the route-table
