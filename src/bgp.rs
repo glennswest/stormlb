@@ -721,8 +721,11 @@ mod tests {
         assert_eq!(check_open(&body, 4_200_000_001, V6).unwrap().asn, 4_200_000_001);
     }
 
-    /// An UPDATE body's (withdrawn, attributes as (flags, type, value), NLRI).
-    fn parse_update(m: &[u8]) -> (Vec<u8>, Vec<(u8, u8, Vec<u8>)>, Vec<u8>) {
+    /// A path attribute as (flags, type, value).
+    type Attr = (u8, u8, Vec<u8>);
+
+    /// An UPDATE body's (withdrawn, attributes, NLRI).
+    fn parse_update(m: &[u8]) -> (Vec<u8>, Vec<Attr>, Vec<u8>) {
         let body = &m[19..];
         let wl = u16::from_be_bytes([body[0], body[1]]) as usize;
         let withdrawn = body[2..2 + wl].to_vec();
@@ -737,7 +740,7 @@ mod tests {
         (withdrawn, attrs, body[4 + wl + al..].to_vec())
     }
 
-    fn find(attrs: &[(u8, u8, Vec<u8>)], t: u8) -> Option<&Vec<u8>> {
+    fn find(attrs: &[Attr], t: u8) -> Option<&Vec<u8>> {
         attrs.iter().find(|a| a.1 == t).map(|a| &a.2)
     }
 

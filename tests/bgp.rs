@@ -235,8 +235,11 @@ async fn a_peer_with_the_wrong_as_is_refused() {
     assert!(next_of(&mut rx, UPDATE, 1).await.is_none());
 }
 
-/// An UPDATE's path attributes as (flags, type, value).
-fn update_attrs(body: &[u8]) -> Vec<(u8, u8, Vec<u8>)> {
+/// A path attribute as (flags, type, value).
+type Attr = (u8, u8, Vec<u8>);
+
+/// An UPDATE's path attributes.
+fn update_attrs(body: &[u8]) -> Vec<Attr> {
     let wl = u16::from_be_bytes([body[0], body[1]]) as usize;
     let al = u16::from_be_bytes([body[2 + wl], body[3 + wl]]) as usize;
     let mut a = &body[4 + wl..4 + wl + al];
@@ -249,7 +252,7 @@ fn update_attrs(body: &[u8]) -> Vec<(u8, u8, Vec<u8>)> {
     out
 }
 
-fn attr_value(attrs: &[(u8, u8, Vec<u8>)], t: u8) -> Option<Vec<u8>> {
+fn attr_value(attrs: &[Attr], t: u8) -> Option<Vec<u8>> {
     attrs.iter().find(|a| a.1 == t).map(|a| a.2.clone())
 }
 
