@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### 2026-11-18
-- **docs:** no "not implemented" left (#38): VRRP over IPv6 and BGP 4-octet
+- **docs:** no stub markers left (#38): VRRP over IPv6 and BGP 4-octet
   ASNs / MP-BGP are documented as refused by the config, with their gaps
   filed as #39 and #40 (README gaps, design.md, deck, bgp.rs module doc).
 

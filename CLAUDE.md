@@ -430,7 +430,7 @@ deliberate commit of its own.
       or annotation), timeouts/retries, HTTPRoute status, per-backend
       metrics. File: storefront spread checks (stormstorefront), console
       page (stormconsole), sc columns (sc).
-- [x] #38 (P-1) no stubs: README's "VRRP over IPv6 is not implemented".
+- [x] #38 (P-1) no stubs: README said VRRP over IPv6 was a stub.
       The config already refuses both (vrrp on an IPv6 address; BGP ASN >
       65535), so docs now say "refused" and the gaps are #39, #40 (P3).
       README, design.md, deck, bgp.rs doc, CHANGELOG; sc-build doc build.
