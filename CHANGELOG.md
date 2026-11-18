@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### 2026-11-18
+- **feat:** BGP 4-octet ASNs and MP-BGP IPv6 (#40). The OPEN now offers
+  the 4-octet AS (RFC 6793) and Multiprotocol (RFC 4760, the VIP's AFI,
+  SAFI 1) capabilities; My AS is AS_TRANS above 65535. The peer's OPEN is
+  parsed for capabilities (RFC 4271 and RFC 9072 extended parameters): its
+  AS is the 4-octet capability's when offered, and a VIP family it does not
+  offer is refused with Unsupported Capability (2/7). AS_PATH is 4-byte to
+  a 4-octet peer, 2-byte with AS_TRANS + AS4_PATH to an old one. An IPv6
+  VIP is announced as `/128` in MP_REACH_NLRI and withdrawn in
+  MP_UNREACH_NLRI. New `[bgp] next_hop` (default `router_id`; an IPv6 VIP
+  needs this node's global IPv6). Peers may be IPv6 addresses. ASNs 0,
+  23456 and 4294967295 are refused. `tests/bgp.rs` covers 4-octet both
+  sides, AS4_PATH to an old peer, the IPv6 announce/withdraw and the
+  refusal; unit tests for every encoding and OPEN check.
 - **feat:** VRRP over IPv6 (#39): an IPv6 VIP is owned by VRRP like an
   IPv4 one, no longer refused. RFC 5798 for IPv6: a raw IPPROTO_VRRP
   socket bound to the interface's link-local (waited for while DAD runs)

@@ -91,8 +91,12 @@ the network.
   60 s keepalive tick (#6). It also needs the session Established and
   enforces the negotiated hold time, so a dead peer is noticed within that
   time, not only when TCP fails.
-- 2-octet ASNs and IPv4 unicast only; a larger ASN is refused at start.
-  4-octet ASNs and multiprotocol BGP are #40.
+- BGP offers the 4-octet AS (RFC 6793) and Multiprotocol (RFC 4760)
+  capabilities (#40): any ASN but the reserved ones (0, 23456, 4294967295),
+  AS_TRANS + AS4_PATH toward an old 2-octet peer, and an IPv6 VIP announced
+  as a /128 in MP_REACH_NLRI with `next_hop` (this node's global IPv6). It
+  originates one unicast host route; no other family, no route reflection,
+  no add-path.
 - VRRP owns IPv4 and IPv6 VIPs (#39: ff02::12, link-local sources,
   unsolicited Neighbor Advertisements). With no virtual MAC there is no
   virtual link-local either, so an IPv6 advertisement lists the VIP itself

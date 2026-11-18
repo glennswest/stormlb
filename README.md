@@ -116,7 +116,7 @@ The series are in [Metrics](#metrics).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `address` | required | The VIP, IPv4 or IPv6. VRRP owns either (#39); BGP needs IPv4 (#40). |
+| `address` | required | The VIP, IPv4 or IPv6. VRRP owns either (#39); BGP announces either (#40). |
 | `port` | required | Port the L4 proxy listens on (e.g. `6443`). |
 | `bind` | `"0.0.0.0"` | Address the L4 proxy binds. The wildcard means it accepts whether or not this node currently holds the VIP. The VIP's own address works too: the listener sets `IP_FREEBIND`, so it binds before the address arrives. |
 
@@ -163,12 +163,14 @@ probed at once rather than after an interval.
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `false` | |
-| `local_asn` | `0` | Must be 1–65535. 2-byte ASNs only. |
-| `router_id` | `""` | This node's IPv4. It is the BGP identifier **and** the next-hop advertised for the VIP. |
-| `[[bgp.peers]]` `address`, `asn`, `port` | none; `port` 179 | IPv4 peers. stormlb dials each on `port`. The peer's OPEN must carry `asn`, or the session is refused with a Bad Peer AS NOTIFICATION. |
+| `local_asn` | `0` | 1–4294967294, not 23456 (AS_TRANS). 4-octet ASNs work (#40). |
+| `router_id` | `""` | A dotted quad: the BGP identifier, and the IPv4 VIP's next-hop unless `next_hop` is set. Usually this node's IPv4. |
+| `next_hop` | `router_id` | The next-hop advertised for the VIP, in the VIP's family. An IPv6 VIP needs it: this node's global IPv6 (link-local is refused). |
+| `[[bgp.peers]]` `address`, `asn`, `port` | none; `port` 179 | IPv4 or IPv6 peers. stormlb dials each on `port`. The peer's OPEN must carry `asn` (its 4-octet AS capability's, when it offers one), or the session is refused with a Bad Peer AS NOTIFICATION. Same ASN rules as `local_asn`. |
 
-If the preflight fails (bad ASN, no peers, `router_id` not IPv4), it logs
-`bgp disabled: …` and everything else keeps running.
+If the preflight fails (a reserved ASN, no peers, a peer address that is not
+an IP, `router_id` not a dotted quad, a `next_hop` not in the VIP's family),
+it logs `bgp disabled: …` and everything else keeps running.
 
 ## What each half does
 
@@ -369,11 +371,19 @@ A minimal speaker: one outbound session per peer, reconnecting every 5 s
 after failure. The session follows RFC 4271's FSM as far as a speaker that
 originates one route needs (#6):
 
-1. It sends OPEN (version 4, hold 180 s, no optional parameters).
+1. It sends OPEN (version 4, hold 180 s) with two capabilities (RFC 5492):
+   Multiprotocol (RFC 4760) for the VIP's family, unicast (AFI 1 or 2,
+   SAFI 1), and 4-octet AS (RFC 6793) with `local_asn`. My AS is
+   `local_asn`, or AS_TRANS (23456) when it is above 65535.
 2. It reads the peer's OPEN, within 4 minutes, and checks it. The version
-   must be 4, the AS must be the configured `asn`, and the hold time must be
-   0 or at least 3 s. Otherwise it sends the matching OPEN Message Error
-   NOTIFICATION (subcode 1, 2 or 6) and drops the session.
+   must be 4, the AS must be the configured `asn` (the 4-octet AS
+   capability's when offered; a peer configured above 65535 must offer it),
+   the hold time must be 0 or at least 3 s, and the VIP's family must be
+   negotiated (a peer offering no Multiprotocol capability has IPv4 unicast
+   only). Otherwise it sends the matching OPEN Message Error NOTIFICATION
+   (subcode 1, 2, 6, or 7 Unsupported Capability with the Multiprotocol
+   capability it needs) and drops the session. Optional parameters are read
+   in the RFC 4271 and the RFC 9072 extended layout.
 3. It answers with a KEEPALIVE and waits for the peer's. Only then is the
    session Established, and only then is any UPDATE sent.
 4. The hold time is the smaller of 180 s and the peer's. KEEPALIVEs go
@@ -381,14 +391,25 @@ originates one route needs (#6):
    gets a Hold Timer Expired NOTIFICATION and the session is dropped.
    Hold 0 means neither.
 
-It announces `<vip>/32` (ORIGIN IGP, AS_PATH `[local_asn]`, NEXT_HOP
-`router_id`) while the config VIP has at least one healthy backend, and
-withdraws it otherwise. Health is checked every 250 ms, and a change is sent
+It announces the VIP's host route while the config VIP has at least one
+healthy backend, and withdraws it otherwise:
+
+- IPv4: `<vip>/32` in the classic NLRI, ORIGIN IGP, AS_PATH `[local_asn]`,
+  NEXT_HOP `next_hop` (default `router_id`); withdrawn in Withdrawn Routes.
+- IPv6: `<vip>/128` in MP_REACH_NLRI (AFI 2, SAFI 1, the 16-byte
+  `next_hop`), ORIGIN IGP, AS_PATH `[local_asn]`; withdrawn in
+  MP_UNREACH_NLRI.
+- AS_PATH is 4-byte to a peer that offered the 4-octet AS capability. To
+  one that did not, it is 2-byte; with a `local_asn` above 65535 it carries
+  AS_TRANS and an AS4_PATH (optional transitive) with the real ASN.
+
+ Health is checked every 250 ms, and a change is sent
 at once, so a withdraw follows a failed health check within a quarter
 second (it waited for the 60 s keepalive tick before #6). On Established it
 announces right away if healthy. Received UPDATEs are read and ignored; a
-NOTIFICATION ends the session. IPv4 unicast only. Every healthy node
-advertises the same /32, so the upstream router ECMP-hashes across them.
+NOTIFICATION ends the session. Every healthy node advertises the same
+route, so the upstream router ECMP-hashes across them. The session's
+transport may be IPv4 or IPv6 whatever the VIP's family.
 
 ## Ports and endpoints
 
@@ -540,7 +561,7 @@ commit of its own. A new golden is requested with
 
 Tests: config parsing and defaults, pool round-robin, health filtering and
 member replacement, TCP health check, CA-file validation, the VRRP state machine and advertisement
-encode/parse/checksum, BGP OPEN/UPDATE/withdraw encoding, router header
+encode/parse/checksum, BGP OPEN/capabilities/UPDATE/withdraw encoding (IPv4 and MP-BGP IPv6, 2- and 4-octet AS paths) and OPEN checks, router header
 parsing, the router's own `/healthz` bytes on a real socket, and two
 integration tests. `tests/balancer.rs` drives round-robin plus failover
 through the real L4 proxy. `tests/vips.rs` drives the VIP API over a real
@@ -576,7 +597,13 @@ an older kernel it is skipped and says so.)
 sc-build 'cargo build --release --locked && tests/vrrp-netns.sh'
 ```
 
-BGP against a real peer is not covered.
+`tests/bgp.rs` runs the speaker against a fake peer on loopback: nothing
+announced before Established, announce/withdraw within a second of a health
+change, the hold timer, a wrong peer AS refused, 4-octet ASNs on both sides,
+AS_TRANS + AS4_PATH to an old peer, an IPv6 VIP announced and withdrawn by
+MP_REACH/MP_UNREACH_NLRI, and a peer without IPv6 unicast refused with
+Unsupported Capability. BGP against a real router (FRR, BIRD) is not
+covered.
 
 ### Tests on a node: the test container
 
@@ -664,8 +691,6 @@ What the code does not do yet, which older docs implied it did:
 - [stormcert#69](https://github.com/glennswest/stormcert/issues/69):
   stormcert can't renew the router's wildcard pair (it re-issues it on
   every pass), so stormcos's renew check skips `router.crt` until then.
-- [#40](https://github.com/glennswest/stormlb/issues/40): BGP speaks
-  2-octet ASNs and IPv4 unicast only; a `local_asn` above 65535 is refused.
 - VRRP's `CAP_NET_ADMIN` and `CAP_NET_RAW` come from
   stormpump keeping every capability for a container today. Once stormpump#47
   sets a default, stormlb's spec must ask for both.

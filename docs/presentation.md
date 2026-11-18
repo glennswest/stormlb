@@ -68,7 +68,7 @@ From stormcentral's relationships graph (`stormcentral check`, `config/stormcent
       │   health loop (tcp|http|https) → healthy set                 │
       │   L4 proxy: round-robin over healthy backends, splice        │
       │   VRRP thread: own the VIP on one node (netlink + raw ARP)   │
-      │   BGP tasks:   announce VIP/32 while ≥1 backend is healthy   │
+      │   BGP tasks:   announce VIP/32|128 while a backend is healthy│
       └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -95,9 +95,9 @@ Router only if there is no `[vip]`. Otherwise the L4 balancer runs in the foregr
 - **Health checks:** `tcp` connect, or `http`/`https` `GET /readyz` with an expected status; `https` verified against `ca_file` (the cluster CA) when given. Checks every 2 s with a 2 s timeout by default.
 - **VIP API (`[api]`, #16):** `PUT`/`GET`/`DELETE /api/v1/vips/{name}` on `127.0.0.1:9109`. Named VIPs with their own backends, health and VRRP. A change is validated and bound before it is applied; backends that stay keep their health; proxied connections are never cut; saved to `state_file`.
 - **VRRP v3 (RFC 5798 §6.4):** raw IP proto 112 to `224.0.0.18`. Master sends adverts; Backup takes over after the master-down time (3.6 s at defaults), preempts a lower-priority Master, and takes over after Skew_Time when a Master resigns (priority 0). Ownership follows backend health. Claim is `<vip>/32` over rtnetlink plus a raw gratuitous ARP: no `ip` or `arping` needed (#7). IPv6 VIPs too (#39): `ff02::12`, `<vip>/128` nodad, an unsolicited Neighbor Advertisement.
-- **BGP:** minimal speaker, one outbound session per peer on TCP 179. Announces `<vip>/32` with NEXT_HOP = `router_id` while a backend is healthy, and withdraws it otherwise. Upstream ECMP gives active-active.
+- **BGP:** minimal speaker, one outbound session per peer on TCP 179. Announces `<vip>/32` (or `/128` by MP-BGP) with NEXT_HOP = `next_hop` (default `router_id`) while a backend is healthy, and withdraws it otherwise. 4-octet ASNs (#40). Upstream ECMP gives active-active.
 
-Unit-tested; `tests/balancer.rs` drives round-robin and failover through the real proxy, and `tests/vips.rs` drives the API end to end (create, change backends, move, remove, refusals, token, restart from `state_file`, CA-verified https health). VRRP and BGP on the wire are **not** covered by tests.
+Unit-tested; `tests/balancer.rs` drives round-robin and failover through the real proxy, and `tests/vips.rs` drives the API end to end (create, change backends, move, remove, refusals, token, restart from `state_file`, CA-verified https health). `tests/vrrp-netns.sh` runs VRRP between two stormlb in network namespaces, `tests/bgp.rs` runs BGP against a fake peer (4-octet AS, IPv6).
 
 ---
 
@@ -110,7 +110,7 @@ Unit-tested; `tests/balancer.rs` drives round-robin and failover through the rea
 | TLS to HTTPS-only backends (stormcos#81) | **done** (#13): `storm.io/backend-protocol: https`, verified against `backend_ca_file`, set in the golden (the node CA) |
 | Running the test container on test machines | runner shipped (`stormcentral test run`); `test/requires.toml` declares `host_network` (all suites) and the `nodes` read (`long`), `test/build.sh` builds the binary: **ready, not yet run on a test machine** |
 | VRRP over IPv6 (ff02::12, link-local source, unsolicited NA) | **done** (#39) |
-| 4-octet ASNs, MP-BGP (#40) | refused by the config today |
+| 4-octet ASNs, MP-BGP IPv6 | **done** (#40) |
 | Wildcard hosts, path/header matches, 502 on a dead backend | not done (router) |
 | Sub-second VRRP failover (config takes whole seconds) | not possible today |
 
@@ -133,7 +133,7 @@ One TOML file; a section's presence enables it:
 | `[[backend]]` | `address` (IP literal), `port` |
 | `[health]` | `mode` (tcp), `path` (`/readyz`), `interval_secs` (2), `timeout_secs` (2), `expect_status` ([200]), `ca_file` |
 | `[vrrp]` | `enabled` (false), `interface`, `vrid` (51), `priority` (100), `advert_interval_secs` (1) |
-| `[bgp]` | `enabled` (false), `local_asn`, `router_id`, `[[bgp.peers]]` `address`/`asn` |
+| `[bgp]` | `enabled` (false), `local_asn`, `router_id`, `next_hop` (router_id), `[[bgp.peers]]` `address`/`asn`/`port` (179) |
 
 Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 

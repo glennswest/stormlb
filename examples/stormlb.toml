@@ -37,14 +37,16 @@ priority = 200             # 255 = address owner, starts Master; others start Ba
                            # Ownership follows health: no healthy backend, no VIP.
 advert_interval_secs = 1
 
-# L3 mode: every node with a healthy backend advertises the VIP /32; the
-# upstream router ECMP-hashes across them. 2-byte ASNs only.
+# L3 mode: every node with a healthy backend advertises the VIP /32 (or
+# /128 by MP-BGP for an IPv6 VIP); the upstream router ECMP-hashes across
+# them. 4-octet ASNs work (not 0, 23456, 4294967295).
 [bgp]
 enabled = false
 local_asn = 64512
-router_id = "192.168.8.51"
+router_id = "192.168.8.51"   # BGP identifier; the IPv4 VIP's next-hop
+# next_hop = "fd09::51"      # required for an IPv6 VIP: this node's global IPv6
 # [[bgp.peers]]
-# address = "192.168.8.1"
+# address = "192.168.8.1"     # IPv4 or IPv6
 # asn = 64512                 # the peer's OPEN must carry it
 # port = 179
 
