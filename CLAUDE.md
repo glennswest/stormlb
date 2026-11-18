@@ -436,3 +436,19 @@ deliberate commit of its own.
       README, design.md, deck, bgp.rs doc, CHANGELOG; sc-build doc build.
       Done: sc-build passed at da7ced4 (release, tests, clippy, doc; first
       run a flake, not filed); #38 closed; image build 536e73a05ebf.
+- [ ] #39 (P3) VRRP over IPv6 (RFC 5798 VRRPv3 for IPv6).
+  - [ ] vrrp.rs generic over the family: AF_INET6 raw IPPROTO_VRRP socket
+        bound to the interface's link-local, joined to ff02::12, hop limit
+        255 (checked on receive via IPV6_RECVHOPLIMIT), checksum over the
+        IPv6 pseudo-header; tie-break on the peer's link-local. The address
+        list carries the VIP (no virtual MAC, so no virtual link-local:
+        documented deviation from §5.2.9, as the node MAC is for IPv4).
+  - [ ] vip.rs: RTM_NEWADDR/DELADDR AF_INET6 `<vip>/128` with IFA_F_NODAD
+        (usable at once), link-local lookup, unsolicited Neighbor
+        Advertisement (override, target link-layer option) to ff02::1 in
+        place of the gratuitous ARP.
+  - [ ] vips.rs: drop "vrrp needs an IPv4 address"; unit tests (codec,
+        pseudo-header, NA frame, address payloads, `lo` ::1 is not link-local).
+  - [ ] tests/vrrp-netns.sh: an IPv6 pass (same six checks on fd09::100).
+  - [ ] Docs (README VRRP/API/gaps, design, deck), CHANGELOG; sc-build,
+        image, close #39.
