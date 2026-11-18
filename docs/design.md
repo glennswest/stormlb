@@ -92,7 +92,12 @@ the network.
   enforces the negotiated hold time, so a dead peer is noticed within that
   time, not only when TCP fails.
 - 2-octet ASNs and IPv4 unicast only; a larger ASN is refused at start.
-  4-octet ASNs and multiprotocol BGP are #40, VRRP over IPv6 is #39.
+  4-octet ASNs and multiprotocol BGP are #40.
+- VRRP owns IPv4 and IPv6 VIPs (#39: ff02::12, link-local sources,
+  unsolicited Neighbor Advertisements). With no virtual MAC there is no
+  virtual link-local either, so an IPv6 advertisement lists the VIP itself
+  where RFC 5798 §5.2.9 wants the virtual router's link-local first: fine
+  between stormlb peers, possibly not with a third-party VRRPv3 router.
 
 **VRRP ownership follows health, not just liveness** (#7). Plain VRRP moves
 the VIP only when its holder stops advertising. A holder whose backends are

@@ -116,7 +116,7 @@ The series are in [Metrics](#metrics).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `address` | required | The VIP. VRRP and BGP need IPv4. |
+| `address` | required | The VIP, IPv4 or IPv6. VRRP owns either (#39); BGP needs IPv4 (#40). |
 | `port` | required | Port the L4 proxy listens on (e.g. `6443`). |
 | `bind` | `"0.0.0.0"` | Address the L4 proxy binds. The wildcard means it accepts whether or not this node currently holds the VIP. The VIP's own address works too: the listener sets `IP_FREEBIND`, so it binds before the address arrives. |
 
@@ -152,7 +152,7 @@ probed at once rather than after an interval.
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `false` | |
-| `interface` | `""` | Interface to advertise on and to hold the VIP on. Its own IPv4 (the first that is not a /32, read over rtnetlink) is the source address. |
+| `interface` | `""` | Interface to advertise on and to hold the VIP on. The source address, read over rtnetlink, is its own IPv4 (the first that is not a /32) for an IPv4 VIP, or its IPv6 link-local (one that has finished DAD; waited for up to 10 s) for an IPv6 VIP. |
 | `vrid` | `51` | Virtual router ID. Must match across the nodes sharing the VIP. |
 | `priority` | `100` | 1–255. `255` starts as Master (address owner) if it has a healthy backend. Everyone else starts Backup. |
 | `preempt` | `true` | A Backup takes over from a lower-priority Master (RFC 5798 Preempt_Mode). Off: whoever is Master stays until it goes. |
@@ -261,7 +261,7 @@ A name is 1–63 of `[a-z0-9-]`. The spec (unknown keys are refused):
 
 `address`, `port` and backend `address`/`port` are required. Addresses are
 IP literals, never names. `bind` defaults to `address`. `health` takes the
-`[health]` keys with the same defaults. `vrrp` (IPv4 only) takes the
+`[health]` keys with the same defaults. `vrrp` (IPv4 or IPv6) takes the
 `[vrrp]` keys without `enabled`; leave it out when something else puts the
 address on the node. `<vip>` is the spec plus `name` and `status`:
 
@@ -313,7 +313,9 @@ needs the VIP among its SANs (stormcos#362).
 ### VRRP (L2)
 
 VRRP v3 (RFC 5798) over a raw `IPPROTO_VRRP` (112) socket joined to
-`224.0.0.18` on `interface`, TTL 255. Each VIP with VRRP (`[vrrp]` for
+`224.0.0.18` on `interface`, TTL 255, for an IPv4 VIP; for an IPv6 VIP
+(#39), joined to `ff02::12`, hop limit 255, and bound to the interface's
+link-local address, which is the source and the tie-break. Each VIP with VRRP (`[vrrp]` for
 `default`, `vrrp` in an API spec) runs its own instance on its own OS
 thread. An instance stops within half a second when its VIP is removed or
 its VRRP changes, and releases the address if it was Master.
@@ -332,8 +334,15 @@ RFC 5798 §6.4, as specified:
   master-down passes, it becomes Master and claims the VIP.
 - **Stopping** (the VIP removed, its VRRP changed, the process told to
   stop): a Master sends priority 0, then releases the VIP.
-- Advertisements carry the RFC checksum over the IPv4 pseudo-header. Ones
-  received with an IP TTL other than 255 or a bad checksum are dropped.
+- Advertisements carry the RFC checksum over the IPv4 or IPv6
+  pseudo-header. Ones received with an IP TTL / hop limit other than 255
+  (IPv6: from `IPV6_HOPLIMIT`) or a bad checksum are dropped.
+- No virtual MAC: the node's own MAC answers for the VIP, announced on
+  takeover. For IPv6 that also means no virtual link-local address, so an
+  advertisement's address list carries the VIP itself rather than the
+  virtual router's link-local first (RFC 5798 §5.2.9). Peers that are all
+  stormlb agree on that; a third-party VRRPv3 router on the same VRID may
+  not.
 
 **Ownership follows backend health** (beyond the RFC): a Master whose VIP has
 no healthy backend resigns (priority 0, release), and a Backup with none
@@ -342,10 +351,16 @@ healthy backend, no node holds it. The address owner (255) starts as Backup
 until it has one.
 
 Claim adds `<vip>/32` to the interface over rtnetlink, then broadcasts three
-gratuitous ARP replies, 0.5 s apart, on an `AF_PACKET` socket. Release
-deletes the address. Both are idempotent. No `ip` or `arping` binary is
-used, so the golden needs none. It needs `CAP_NET_ADMIN` (the address) and
-`CAP_NET_RAW` (the VRRP and ARP sockets).
+gratuitous ARP replies, 0.5 s apart, on an `AF_PACKET` socket. For IPv6 it
+adds `<vip>/128` with `nodad` (usable at once: the election already decided
+the owner) and sends three unsolicited Neighbor Advertisements (Override
+set, target link-layer address = the interface MAC) to `ff02::1`, hop limit
+255, on a raw ICMPv6 socket. A neighbour that has an entry for the VIP moves
+it at once; one without an entry learns it by asking (unless it accepts
+untracked NAs). Release deletes the address. Both are idempotent. No `ip`,
+`arping` or `ndsend` binary is used, so the golden needs none. It needs
+`CAP_NET_ADMIN` (the address) and `CAP_NET_RAW` (the VRRP, ARP and ICMPv6
+sockets).
 
 ### BGP (L3)
 
@@ -383,7 +398,7 @@ advertises the same /32, so the upstream router ECMP-hashes across them.
 | `[vip] port`, e.g. 6443, and each API VIP's `port` | TCP | kube-api clients via the VIP | `[vip]` present, or a VIP made through the API |
 | `[metrics] listen`: **9111** (`auto`: node address and loopback) | plain HTTP, read-only, no token | ironprom on the node; stormcos `check-metrics.sh` | `[metrics]` present |
 | `[api] listen`: **127.0.0.1:9109** by default | plain HTTP, JSON; a bearer token with `token_file` | stormcluster, on the same node | `[api]` present |
-| n/a | IP proto 112 to `224.0.0.18` | VRRP peers | `[vrrp] enabled` |
+| n/a | IP proto 112 to `224.0.0.18` (IPv6: `ff02::12`); ICMPv6 NA to `ff02::1` on an IPv6 takeover | VRRP peers | `[vrrp] enabled`, or `vrrp` in a VIP |
 | 179 (outbound only) | TCP | BGP peers | `[bgp] enabled` |
 | 180 in the golden | plain HTTP, no auth | **stormd's** API, not stormlb's (port + 100, stormcentral's convention). Its TLS and auth are stormd#32. | golden |
 
@@ -546,11 +561,14 @@ refused.
 VRRP on a real wire, with no root: `tests/vrrp-netns.sh` runs two stormlb
 processes in two network namespaces joined by a veth, inside an unprivileged
 user namespace (`unshare -rn`). Each makes the same VIP through its API with
-VRRP on the veth. Checked against the kernel's `ip addr` and `ip neigh`:
+VRRP on the veth. Checked against the kernel's `ip addr` and `ip neigh`,
+once with an IPv4 VIP and once with an IPv6 one (`fd09::100`, #39):
 takeover after master-down, preemption by the higher priority, the
-gratuitous ARP updating the peer's neighbour entry, a resign on no healthy
-backend, preempting back, and priority 0 on removal cutting the takeover to
-about a second.
+gratuitous ARP / unsolicited NA updating the peer's neighbour entry, a
+resign on no healthy backend, preempting back, and priority 0 on removal
+cutting the takeover to about a second. (The IPv6 neighbour check needs
+`accept_untracked_na`, kernel 5.19+; on an older kernel it is skipped and
+says so.)
 
 ```
 sc-build 'cargo build --release --locked && tests/vrrp-netns.sh'
@@ -644,8 +662,6 @@ What the code does not do yet, which older docs implied it did:
 - [stormcert#69](https://github.com/glennswest/stormcert/issues/69):
   stormcert can't renew the router's wildcard pair (it re-issues it on
   every pass), so stormcos's renew check skips `router.crt` until then.
-- [#39](https://github.com/glennswest/stormlb/issues/39): VRRP is IPv4
-  only; a `vrrp` spec on an IPv6 address is refused.
 - [#40](https://github.com/glennswest/stormlb/issues/40): BGP speaks
   2-octet ASNs and IPv4 unicast only; a `local_asn` above 65535 is refused.
 - VRRP's `CAP_NET_ADMIN` and `CAP_NET_RAW` come from

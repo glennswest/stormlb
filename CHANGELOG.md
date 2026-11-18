@@ -3,6 +3,18 @@
 ## [Unreleased]
 
 ### 2026-11-18
+- **feat:** VRRP over IPv6 (#39): an IPv6 VIP is owned by VRRP like an
+  IPv4 one, no longer refused. RFC 5798 for IPv6: a raw IPPROTO_VRRP
+  socket bound to the interface's link-local (waited for while DAD runs)
+  and joined to `ff02::12`, hop limit 255 (checked on receipt via
+  `IPV6_HOPLIMIT`), the checksum over the IPv6 pseudo-header, ties broken
+  on the link-local. The claim adds `<vip>/128` with `nodad` over rtnetlink
+  and sends three unsolicited Neighbor Advertisements (Override, target
+  link-layer address) on a raw ICMPv6 socket; no new binary or crate.
+  The address list carries the VIP (no virtual MAC, so no virtual
+  link-local; documented). `tests/vrrp-netns.sh` runs its six checks for
+  IPv4 and then IPv6; unit tests for the IPv6 codec, pseudo-header, hop
+  limit, NA packet and netlink payloads.
 - **docs:** no stub markers left (#38): VRRP over IPv6 and BGP 4-octet
   ASNs / MP-BGP are documented as refused by the config, with their gaps
   filed as #39 and #40 (README gaps, design.md, deck, bgp.rs module doc).

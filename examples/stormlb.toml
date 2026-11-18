@@ -26,7 +26,8 @@ timeout_secs = 2
 expect_status = [200]
 
 # L2 mode: one node owns the VIP (VRRP); failover after master-down
-# (3 x advert + skew, 3.6 s at advert_interval_secs = 1).
+# (3 x advert + skew, 3.6 s at advert_interval_secs = 1). An IPv6 [vip]
+# address works too: VRRP then speaks IPv6 from the interface's link-local.
 [vrrp]
 enabled = true
 interface = "eth0"

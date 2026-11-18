@@ -94,7 +94,7 @@ Router only if there is no `[vip]`. Otherwise the L4 balancer runs in the foregr
 - **L4 proxy:** round-robin over *healthy* backends, TCP_NODELAY, splice. Backends start unhealthy; the first passing check admits them.
 - **Health checks:** `tcp` connect, or `http`/`https` `GET /readyz` with an expected status; `https` verified against `ca_file` (the cluster CA) when given. Checks every 2 s with a 2 s timeout by default.
 - **VIP API (`[api]`, #16):** `PUT`/`GET`/`DELETE /api/v1/vips/{name}` on `127.0.0.1:9109`. Named VIPs with their own backends, health and VRRP. A change is validated and bound before it is applied; backends that stay keep their health; proxied connections are never cut; saved to `state_file`.
-- **VRRP v3 (RFC 5798 §6.4):** raw IP proto 112 to `224.0.0.18`. Master sends adverts; Backup takes over after the master-down time (3.6 s at defaults), preempts a lower-priority Master, and takes over after Skew_Time when a Master resigns (priority 0). Ownership follows backend health. Claim is `<vip>/32` over rtnetlink plus a raw gratuitous ARP: no `ip` or `arping` needed (#7).
+- **VRRP v3 (RFC 5798 §6.4):** raw IP proto 112 to `224.0.0.18`. Master sends adverts; Backup takes over after the master-down time (3.6 s at defaults), preempts a lower-priority Master, and takes over after Skew_Time when a Master resigns (priority 0). Ownership follows backend health. Claim is `<vip>/32` over rtnetlink plus a raw gratuitous ARP: no `ip` or `arping` needed (#7). IPv6 VIPs too (#39): `ff02::12`, `<vip>/128` nodad, an unsolicited Neighbor Advertisement.
 - **BGP:** minimal speaker, one outbound session per peer on TCP 179. Announces `<vip>/32` with NEXT_HOP = `router_id` while a backend is healthy, and withdraws it otherwise. Upstream ECMP gives active-active.
 
 Unit-tested; `tests/balancer.rs` drives round-robin and failover through the real proxy, and `tests/vips.rs` drives the API end to end (create, change backends, move, remove, refusals, token, restart from `state_file`, CA-verified https health). VRRP and BGP on the wire are **not** covered by tests.
@@ -109,7 +109,8 @@ Unit-tested; `tests/balancer.rs` drives round-robin and failover through the rea
 | TLS on `:443` (`[router.tls]`: SNI, reload, 308 from `:80`) | **done** (#14); on in the golden (#21) with stormcos#363's pair |
 | TLS to HTTPS-only backends (stormcos#81) | **done** (#13): `storm.io/backend-protocol: https`, verified against `backend_ca_file`, set in the golden (the node CA) |
 | Running the test container on test machines | runner shipped (`stormcentral test run`); `test/requires.toml` declares `host_network` (all suites) and the `nodes` read (`long`), `test/build.sh` builds the binary: **ready, not yet run on a test machine** |
-| 4-octet ASNs, MP-BGP (#40), VRRP over IPv6 (#39) | refused by the config today |
+| VRRP over IPv6 (ff02::12, link-local source, unsolicited NA) | **done** (#39) |
+| 4-octet ASNs, MP-BGP (#40) | refused by the config today |
 | Wildcard hosts, path/header matches, 502 on a dead backend | not done (router) |
 | Sub-second VRRP failover (config takes whole seconds) | not possible today |
 
@@ -147,7 +148,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 | `[vip] port`, e.g. 6443, and each API VIP's port | kube-api clients via the VIP (7443 by default, stormcluster#35; not 6443 on a master) |
 | **127.0.0.1:9109** (`[api]`) | the VIP API, for stormcluster on the node |
 | **9111** (`[metrics]`) | Prometheus `/metrics`: requests by host and code, latency, upstream errors, connections, reloads, VIP health, `process_*` (#12) |
-| IP proto 112 → `224.0.0.18` | VRRP peers |
+| IP proto 112 → `224.0.0.18` / `ff02::12` | VRRP peers |
 | 179, outbound only | BGP peers |
 | 180 | **stormd's** API in the golden, not stormlb's; plain, no auth (stormd#32) |
 
