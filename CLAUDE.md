@@ -434,3 +434,5 @@ deliberate commit of its own.
       The config already refuses both (vrrp on an IPv6 address; BGP ASN >
       65535), so docs now say "refused" and the gaps are #39, #40 (P3).
       README, design.md, deck, bgp.rs doc, CHANGELOG; sc-build doc build.
+      Done: sc-build passed at da7ced4 (release, tests, clippy, doc; first
+      run a flake, not filed); #38 closed; image build 536e73a05ebf.
