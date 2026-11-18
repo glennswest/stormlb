@@ -174,7 +174,8 @@ async fn bad_requests_are_refused_and_change_nothing() {
         ("/api/v1/vips/two", r#"{"address":"127.0.0.1","port":1,"bogus":1}"#.to_string(), 400, "bogus"),
         ("/api/v1/vips/two", r#"{"address":"127.0.0.1","port":1,"backends":[{"address":"master1","port":6443}]}"#.to_string(), 400, "master1"),
         ("/api/v1/vips/two", r#"{"address":"127.0.0.1","port":1,"health":{"mode":"https","ca_file":"/nonexistent/ca.crt"}}"#.to_string(), 400, "/nonexistent/ca.crt"),
-        ("/api/v1/vips/two", r#"{"address":"::1","port":1,"vrrp":{"interface":"lo"}}"#.to_string(), 400, "IPv4"),
+        // IPv6 VRRP is checked like IPv4's (#39), no longer refused outright.
+        ("/api/v1/vips/two", r#"{"address":"::1","port":1,"vrrp":{"interface":"lo","vrid":0}}"#.to_string(), 400, "vrid"),
         ("/api/v1/vips/Two", spec(p2, &[a]), 400, "name"),
         // Another VIP's listener.
         ("/api/v1/vips/two", spec(p1, &[a]), 409, "already VIP one"),

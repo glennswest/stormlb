@@ -18,7 +18,7 @@ use crate::{balancer, vrrp};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
@@ -31,7 +31,7 @@ pub const CONFIG_VIP: &str = "default";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VipSpec {
-    /// The VIP (IPv4 or IPv6; VRRP needs IPv4).
+    /// The VIP (IPv4 or IPv6; VRRP owns either, #39).
     pub address: String,
     pub port: u16,
     /// The address the listener binds. Default: `address` itself.
@@ -168,7 +168,7 @@ pub struct Registry {
 struct Checked {
     listen: SocketAddr,
     backends: Vec<SocketAddr>,
-    vrrp_vip: Option<Ipv4Addr>,
+    vrrp_vip: Option<IpAddr>,
 }
 
 impl Registry {
@@ -394,7 +394,7 @@ fn bind(listen: SocketAddr) -> Result<tokio::net::TcpListener, ApplyError> {
 
 /// Start the VIP's VRRP instance. It holds the address only while the VIP has
 /// a healthy backend.
-fn start_vrrp(name: &str, spec: &VipSpec, vip: Option<Ipv4Addr>, ctl: Arc<dyn VipController>, pool: Arc<Pool>) -> Option<Arc<vrrp::Handle>> {
+fn start_vrrp(name: &str, spec: &VipSpec, vip: Option<IpAddr>, ctl: Arc<dyn VipController>, pool: Arc<Pool>) -> Option<Arc<vrrp::Handle>> {
     let (v, vip) = (spec.vrrp.clone()?, vip?);
     let h = Arc::new(vrrp::Handle::default());
     let h2 = h.clone();
@@ -462,9 +462,6 @@ fn check(spec: &VipSpec) -> Result<Checked, ApplyError> {
     let vrrp_vip = match &spec.vrrp {
         None => None,
         Some(v) => {
-            let IpAddr::V4(v4) = vip else {
-                return Err(bad("vrrp needs an IPv4 address".into()));
-            };
             if v.interface.is_empty() {
                 return Err(bad("vrrp.interface is required".into()));
             }
@@ -474,7 +471,7 @@ fn check(spec: &VipSpec) -> Result<Checked, ApplyError> {
             if v.advert_interval_secs == 0 || v.advert_interval_secs > 40 {
                 return Err(bad("vrrp.advert_interval_secs must be 1–40".into()));
             }
-            Some(v4)
+            Some(vip)
         }
     };
     Ok(Checked { listen: SocketAddr::new(bind_ip, spec.port), backends, vrrp_vip })

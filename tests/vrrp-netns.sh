@@ -5,10 +5,12 @@
 # and its own API port as the backend (so health can be switched off by
 # pointing the backend at a closed port).
 #
-# Checks, against the kernel's view (`ip addr`, `ip neigh`):
+# Checks, against the kernel's view (`ip addr`, `ip neigh`), once for an IPv4
+# VIP (10.9.0.100) and once for an IPv6 one (fd09::100, #39: VRRP over IPv6,
+# link-local sources, ff02::12, unsolicited Neighbor Advertisements):
 #   1. A alone (priority 100) takes the VIP after master-down.
-#   2. B (priority 200) starts and preempts it; A releases it.
-#   3. A learns B's MAC for the VIP from the gratuitous ARP.
+#   2. B (priority 200) makes the same VIP and preempts; A releases it.
+#   3. A learns B's MAC for the VIP from the gratuitous ARP / the NA.
 #   4. B loses every healthy backend: it resigns, and A has the VIP within
 #      Skew_Time + slack, well under the 3.6 s master-down.
 #   5. B's backend is healthy again: it preempts back.
@@ -24,7 +26,6 @@ if [ "${STORMLB_IN_NS:-}" != 1 ]; then
 fi
 
 W=$(mktemp -d)
-VIP=10.9.0.100
 pids=()
 cleanup() { kill "${pids[@]}" 2>/dev/null || true; wait 2>/dev/null || true; rm -rf "$W"; }
 trap cleanup EXIT
@@ -39,10 +40,28 @@ ip link add va type veth peer name vb
 ip link set va netns "$NA"
 ip link set vb netns "$NB"
 ns() { local p=$1; shift; nsenter -t "$p" -n "$@"; }
-ns "$NA" ip link set lo up; ns "$NA" ip addr add 10.9.0.1/24 dev va; ns "$NA" ip link set va up
-ns "$NB" ip link set lo up; ns "$NB" ip addr add 10.9.0.2/24 dev vb; ns "$NB" ip link set vb up
-# Let a gratuitous ARP create a neighbour entry, so check 3 can see it.
+HAVE6=0
+[ -d /proc/sys/net/ipv6 ] && HAVE6=1
+for x in "$NA va 10.9.0.1 fd09::1" "$NB vb 10.9.0.2 fd09::2"; do
+    set -- $x
+    ns "$1" ip link set lo up
+    ns "$1" ip addr add "$3/24" dev "$2"
+    if [ "$HAVE6" = 1 ]; then
+        # No DAD on the test link: the link-local is usable (not tentative)
+        # the moment the veth is up.
+        ns "$1" sh -c "echo 0 > /proc/sys/net/ipv6/conf/$2/accept_dad" 2>/dev/null || true
+        ns "$1" ip -6 addr add "$4/64" dev "$2" nodad
+    fi
+    ns "$1" ip link set "$2" up
+done
+# Let a gratuitous ARP / an unsolicited NA create a neighbour entry, so check
+# 3 can see it.
 ns "$NA" sh -c 'echo 1 > /proc/sys/net/ipv4/conf/va/arp_accept' 2>/dev/null || echo "note: arp_accept not settable"
+NA6=1
+if [ "$HAVE6" = 1 ]; then
+    ns "$NA" sh -c 'echo 1 > /proc/sys/net/ipv6/conf/va/accept_untracked_na' 2>/dev/null || {
+        NA6=0; echo "note: accept_untracked_na not settable (kernel < 5.19): IPv6 check 3 skipped"; }
+fi
 
 printf '[api]\nlisten = "127.0.0.1:9109"\n' > "$W/stormlb.toml"
 
@@ -56,11 +75,12 @@ api() {
     sed -n '1s/^HTTP\/1.1 \([0-9]*\).*/\1/p' "$W/resp" > "$W/status"
     sed '1,/^\r$/d' "$W/resp"
 }
+# The VIP under test ($VIP, $FAM 4 or 6, $PLEN 32 or 128) is set per pass.
 spec() { # iface prio backend-port
     printf '{"address":"%s","port":7443,"backends":[{"address":"127.0.0.1","port":%s}],"health":{"mode":"tcp","interval_secs":1,"timeout_secs":1},"vrrp":{"interface":"%s","vrid":51,"priority":%s,"advert_interval_secs":1}}' \
         "$VIP" "$3" "$1" "$2"
 }
-holds() { ns "$1" ip -4 -o addr show dev "$2" | grep -q " $VIP/32"; }
+holds() { ns "$1" ip -"$FAM" -o addr show dev "$2" | grep -q " $VIP/$PLEN"; }
 not_holds() { ! holds "$@"; }
 # Wait up to $1 seconds for a command to succeed; prints how long it took.
 within() {
@@ -72,56 +92,75 @@ within() {
     done
     echo $(( ($(date +%s%N) - t0) / 1000000 ))
 }
-start() { # name pid iface
+start() { # name pid
     ns "$2" "$BIN" --config "$W/stormlb.toml" > "$W/$1.log" 2>&1 &
     pids+=("$!")
     within 5 ns "$2" bash -c 'exec 3<>/dev/tcp/127.0.0.1/9109' > /dev/null || fail "stormlb $1 API did not come up"
 }
 
-# 1. A alone takes the VIP after master-down (3.6 s at priority 100).
-start a "$NA" va
-api "$NA" PUT /api/v1/vips/api "$(spec va 100 9109)" > /dev/null
-[ "$(cat "$W/status")" = 201 ] || fail "A: PUT answered $(cat "$W/status")"
-ms=$(within 8 holds "$NA" va) || fail "A never took the VIP"
-pass "A (100) took the VIP after ${ms} ms"
-api "$NA" GET /api/v1/vips/api | grep -q '"vrrp":"master"' || fail "A's API does not say master"
-
-# 2. B (200) starts and preempts.
-start b "$NB" vb
-api "$NB" PUT /api/v1/vips/api "$(spec vb 200 9109)" > /dev/null
-ms=$(within 8 holds "$NB" vb) || fail "B (200) never preempted A (100)"
-within 2 not_holds "$NA" va > /dev/null || fail "A kept the VIP after B took it"
-pass "B (200) preempted A in ${ms} ms; A released it"
-api "$NA" GET /api/v1/vips/api | grep -q '"vrrp":"backup"' || fail "A's API does not say backup"
-
-# 3. The gratuitous ARP reached A: its neighbour entry for the VIP is B's MAC.
+start a "$NA"
+start b "$NB"
 BMAC=$(ns "$NB" cat /sys/class/net/vb/address 2>/dev/null || ns "$NB" ip -o link show vb | sed -n 's/.*link\/ether \([0-9a-f:]*\).*/\1/p')
-neigh_is_b() { ns "$NA" ip neigh show "$VIP" dev va | grep -qi "$BMAC"; }
-if within 3 neigh_is_b > /dev/null; then
-    pass "A's neighbour entry for $VIP is B's MAC ($BMAC): gratuitous ARP"
+
+# One pass of the six checks for VIP $VIP, VIP name $1, IPv$FAM.
+checks() {
+    local name=$1 P="IPv$FAM"
+    local path=/api/v1/vips/$name
+
+    # 1. A alone (B has no such VIP) takes it after master-down (3.6 s at
+    #    priority 100).
+    api "$NA" PUT "$path" "$(spec va 100 9109)" > /dev/null
+    [ "$(cat "$W/status")" = 201 ] || fail "$P A: PUT answered $(cat "$W/status"): $(cat "$W/resp")"
+    ms=$(within 8 holds "$NA" va) || fail "$P: A never took the VIP"
+    pass "$P: A (100) took the VIP after ${ms} ms"
+    api "$NA" GET "$path" | grep -q '"vrrp":"master"' || fail "$P: A's API does not say master"
+
+    # 2. B (200) makes the same VIP and preempts.
+    api "$NB" PUT "$path" "$(spec vb 200 9109)" > /dev/null
+    ms=$(within 8 holds "$NB" vb) || fail "$P: B (200) never preempted A (100)"
+    within 2 not_holds "$NA" va > /dev/null || fail "$P: A kept the VIP after B took it"
+    pass "$P: B (200) preempted A in ${ms} ms; A released it"
+    api "$NA" GET "$path" | grep -q '"vrrp":"backup"' || fail "$P: A's API does not say backup"
+
+    # 3. The announcement reached A: its neighbour entry for the VIP is B's MAC.
+    neigh_is_b() { ns "$NA" ip -"$FAM" neigh show "$VIP" dev va | grep -qi "$BMAC"; }
+    if [ "$FAM" = 6 ] && [ "$NA6" = 0 ]; then
+        echo "skip: $P check 3 (accept_untracked_na not settable)"
+    elif within 3 neigh_is_b > /dev/null; then
+        pass "$P: A's neighbour entry for $VIP is B's MAC ($BMAC)"
+    else
+        fail "$P: A has no neighbour entry for $VIP at B's MAC ($BMAC): $(ns "$NA" ip -"$FAM" neigh show "$VIP" dev va)"
+    fi
+
+    # 4. B's backend goes unhealthy: B resigns, A takes over fast.
+    api "$NB" PUT "$path" "$(spec vb 200 1)" > /dev/null
+    ms=$(within 4 holds "$NA" va) || fail "$P: A did not take over when B lost its backends"
+    holds "$NB" vb && fail "$P: B kept the VIP with no healthy backend"
+    pass "$P: B resigned on no healthy backend; A took the VIP ${ms} ms after the change"
+    api "$NB" GET "$path" | grep -q '"healthy":0' || fail "$P: B's API does not show 0 healthy"
+
+    # 5. B's backend is back: B preempts again.
+    api "$NB" PUT "$path" "$(spec vb 200 9109)" > /dev/null
+    ms=$(within 8 holds "$NB" vb) || fail "$P: B did not preempt back once healthy"
+    pass "$P: B healthy again: preempted back in ${ms} ms"
+    within 2 not_holds "$NA" va > /dev/null || fail "$P: A kept the VIP after B took it back"
+
+    # 6. B's VIP is deleted: priority 0, release; A takes over in about
+    #    Skew_Time (0.6 s at priority 100), not master-down (3.6 s).
+    api "$NB" DELETE "$path" > /dev/null
+    ms=$(within 3 holds "$NA" va) || fail "$P: A did not take over after B's VIP was deleted"
+    holds "$NB" vb && fail "$P: B kept the VIP after its VIP was deleted"
+    [ "$ms" -lt 2500 ] || fail "$P: A took ${ms} ms: priority 0 should cut the wait to Skew_Time"
+    pass "$P: B's VIP deleted: priority 0, released; A took the VIP in ${ms} ms"
+}
+
+VIP=10.9.0.100 FAM=4 PLEN=32
+checks api4
+if [ "$HAVE6" = 1 ]; then
+    VIP=fd09::100 FAM=6 PLEN=128
+    checks api6
 else
-    fail "A has no neighbour entry for $VIP at B's MAC ($BMAC): $(ns "$NA" ip neigh show "$VIP" dev va)"
+    echo "SKIP: IPv6 pass (no IPv6 in this kernel)"
 fi
-
-# 4. B's backend goes unhealthy: B resigns, A takes over fast.
-api "$NB" PUT /api/v1/vips/api "$(spec vb 200 1)" > /dev/null
-ms=$(within 4 holds "$NA" va) || fail "A did not take over when B lost its backends"
-holds "$NB" vb && fail "B kept the VIP with no healthy backend"
-pass "B resigned on no healthy backend; A took the VIP ${ms} ms after the change"
-api "$NB" GET /api/v1/vips/api | grep -q '"healthy":0' || fail "B's API does not show 0 healthy"
-
-# 5. B's backend is back: B preempts again.
-api "$NB" PUT /api/v1/vips/api "$(spec vb 200 9109)" > /dev/null
-ms=$(within 8 holds "$NB" vb) || fail "B did not preempt back once healthy"
-pass "B healthy again: preempted back in ${ms} ms"
-within 2 not_holds "$NA" va > /dev/null || fail "A kept the VIP after B took it back"
-
-# 6. B's VIP is deleted: priority 0, release; A takes over in about Skew_Time
-#    (0.6 s at priority 100), not master-down (3.6 s).
-api "$NB" DELETE /api/v1/vips/api > /dev/null
-ms=$(within 3 holds "$NA" va) || fail "A did not take over after B's VIP was deleted"
-holds "$NB" vb && fail "B kept the VIP after its VIP was deleted"
-[ "$ms" -lt 2500 ] || fail "A took ${ms} ms: priority 0 should cut the wait to Skew_Time"
-pass "B's VIP deleted: priority 0, released; A took the VIP in ${ms} ms"
 
 echo "vrrp-netns: all passed"

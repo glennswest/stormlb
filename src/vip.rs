@@ -3,36 +3,46 @@
 //! Behind a trait so the VRRP logic stays testable without root: tests use a
 //! recording mock, production uses [`Netlink`]. Everything is a kernel API —
 //! rtnetlink for links and addresses, an `AF_PACKET` socket for the
-//! gratuitous ARP — so the node needs no `ip` or `arping` binary (the shipped
-//! golden has neither). Needs CAP_NET_ADMIN (addresses) and CAP_NET_RAW (ARP).
+//! gratuitous ARP (IPv4), a raw ICMPv6 socket for the unsolicited Neighbor
+//! Advertisement (IPv6, #39) — so the node needs no `ip`, `arping` or
+//! `ndsend` binary (the shipped golden has none). Needs CAP_NET_ADMIN
+//! (addresses) and CAP_NET_RAW (ARP, NA).
 
 use anyhow::{Context, Result};
 use std::io;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV6};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::time::Duration;
 use tracing::{info, warn};
 
 pub trait VipController: Send + Sync {
-    /// Bring the VIP up on `iface` (idempotent) and announce it (gratuitous ARP).
+    /// Bring the VIP up on `iface` (idempotent) and announce it (gratuitous
+    /// ARP for IPv4, unsolicited Neighbor Advertisement for IPv6).
     fn claim(&self, vip: &str, iface: &str) -> Result<()>;
     /// Remove the VIP from `iface` (idempotent).
     fn release(&self, vip: &str, iface: &str) -> Result<()>;
 }
 
-/// The rtnetlink controller: `<vip>/32` added to and deleted from the
-/// interface, then three gratuitous ARP replies so neighbours and switches
-/// learn the new owner at once.
+/// The rtnetlink controller: `<vip>/32` (IPv4) or `<vip>/128` (IPv6, with
+/// `IFA_F_NODAD` so it is usable at once rather than after duplicate address
+/// detection: the VRRP election already decided who holds it) added to and
+/// deleted from the interface, then three announcements — gratuitous ARP
+/// replies, or unsolicited Neighbor Advertisements with the override flag —
+/// so neighbours and switches learn the new owner at once.
 pub struct Netlink;
 
 impl VipController for Netlink {
     fn claim(&self, vip: &str, iface: &str) -> Result<()> {
-        let ip: Ipv4Addr = vip.parse().with_context(|| format!("VIP {vip} is not IPv4"))?;
+        let ip: IpAddr = vip.parse().with_context(|| format!("VIP {vip} is not an IP address"))?;
         let l = link(iface)?;
         info!("claiming VIP {vip} on {iface}");
-        match addr_change(RTM_NEWADDR, NLM_F_CREATE | NLM_F_EXCL, l.index, ip) {
+        let (payload, len) = match ip {
+            IpAddr::V4(v4) => (addr_payload(l.index, v4), 32),
+            IpAddr::V6(v6) => (addr_payload6(l.index, v6), 128),
+        };
+        match addr_change(RTM_NEWADDR, NLM_F_CREATE | NLM_F_EXCL, &payload) {
             Err(e) if e.raw_os_error() == Some(libc::EEXIST) => {}
-            r => r.with_context(|| format!("adding {vip}/32 to {iface}"))?,
+            r => r.with_context(|| format!("adding {vip}/{len} to {iface}"))?,
         }
         if l.mac != [0; 6] {
             // Spaced out, off the caller's thread: VRRP must keep advertising.
@@ -40,8 +50,12 @@ impl VipController for Netlink {
             let mac = l.mac;
             std::thread::spawn(move || {
                 for i in 0..3 {
-                    if let Err(e) = send_garp(index, mac, ip) {
-                        warn!("gratuitous ARP for {ip}: {e}");
+                    let r = match ip {
+                        IpAddr::V4(v4) => send_garp(index, mac, v4),
+                        IpAddr::V6(v6) => send_na(index, mac, v6),
+                    };
+                    if let Err(e) = r {
+                        warn!("announcing {ip} (gratuitous ARP / neighbor advertisement): {e}");
                         return;
                     }
                     if i < 2 {
@@ -54,12 +68,16 @@ impl VipController for Netlink {
     }
 
     fn release(&self, vip: &str, iface: &str) -> Result<()> {
-        let ip: Ipv4Addr = vip.parse().with_context(|| format!("VIP {vip} is not IPv4"))?;
+        let ip: IpAddr = vip.parse().with_context(|| format!("VIP {vip} is not an IP address"))?;
         let l = link(iface)?;
         info!("releasing VIP {vip} from {iface}");
-        match addr_change(RTM_DELADDR, 0, l.index, ip) {
+        let (payload, len) = match ip {
+            IpAddr::V4(v4) => (addr_payload(l.index, v4), 32),
+            IpAddr::V6(v6) => (addr_payload6(l.index, v6), 128),
+        };
+        match addr_change(RTM_DELADDR, 0, &payload) {
             Err(e) if e.raw_os_error() == Some(libc::EADDRNOTAVAIL) => Ok(()),
-            r => r.with_context(|| format!("deleting {vip}/32 from {iface}")),
+            r => r.with_context(|| format!("deleting {vip}/{len} from {iface}")),
         }
     }
 }
@@ -97,6 +115,28 @@ pub fn interface_ipv4(iface: &str) -> Result<Ipv4Addr> {
         .with_context(|| format!("no IPv4 address on interface {iface}"))
 }
 
+/// The interface's IPv6 link-local address, the VRRP source for IPv6 (RFC
+/// 5798 §5.1.2.1): its first `fe80::/10` address that has finished duplicate
+/// address detection (not tentative, not failed).
+pub fn interface_ipv6_link_local(iface: &str) -> Result<Ipv6Addr> {
+    let l = link(iface)?;
+    let mut req = [0u8; 8];
+    req[0] = libc::AF_INET6 as u8;
+    let msgs = Nl::open()?
+        .request(RTM_GETADDR, NLM_F_DUMP, &req)
+        .context("listing addresses (rtnetlink)")?;
+    parse_addrs6(&msgs, l.index)
+        .into_iter()
+        .find(|a| is_link_local(&a.addr) && a.flags & (IFA_F_TENTATIVE | IFA_F_DADFAILED) == 0)
+        .map(|a| a.addr)
+        .with_context(|| format!("no usable IPv6 link-local address on interface {iface} (IPv6 off, or DAD not finished)"))
+}
+
+/// `fe80::/10`.
+pub fn is_link_local(a: &Ipv6Addr) -> bool {
+    a.segments()[0] & 0xffc0 == 0xfe80
+}
+
 // ── rtnetlink ──────────────────────────────────────────────────────────────
 
 const NLMSG_ERROR: u16 = 2;
@@ -115,11 +155,15 @@ const IFLA_ADDRESS: u16 = 1;
 const IFLA_IFNAME: u16 = 3;
 const IFA_ADDRESS: u16 = 1;
 const IFA_LOCAL: u16 = 2;
+const IFA_FLAGS: u16 = 8;
+const IFA_F_NODAD: u8 = 0x02;
+const IFA_F_DADFAILED: u32 = 0x08;
+const IFA_F_TENTATIVE: u32 = 0x40;
 
-/// `<vip>/32` on interface `index` (scope global), as RTM_NEWADDR or
-/// RTM_DELADDR.
-fn addr_change(ty: u16, flags: u16, index: u32, ip: Ipv4Addr) -> io::Result<()> {
-    Nl::open()?.request(ty, flags | NLM_F_ACK, &addr_payload(index, ip)).map(|_| ())
+/// An address change (an [`addr_payload`] or [`addr_payload6`]) as
+/// RTM_NEWADDR or RTM_DELADDR.
+fn addr_change(ty: u16, flags: u16, payload: &[u8]) -> io::Result<()> {
+    Nl::open()?.request(ty, flags | NLM_F_ACK, payload).map(|_| ())
 }
 
 /// ifaddrmsg {AF_INET, /32, flags 0, scope universe, index} + IFA_LOCAL +
@@ -132,6 +176,17 @@ pub fn addr_payload(index: u32, ip: Ipv4Addr) -> Vec<u8> {
         p.extend_from_slice(&ty.to_ne_bytes());
         p.extend_from_slice(&ip.octets());
     }
+    p
+}
+
+/// ifaddrmsg {AF_INET6, /128, IFA_F_NODAD, scope universe, index} +
+/// IFA_ADDRESS: `<vip>/128`, usable at once (no duplicate address detection).
+pub fn addr_payload6(index: u32, ip: Ipv6Addr) -> Vec<u8> {
+    let mut p = vec![libc::AF_INET6 as u8, 128, IFA_F_NODAD, 0];
+    p.extend_from_slice(&index.to_ne_bytes());
+    p.extend_from_slice(&20u16.to_ne_bytes());
+    p.extend_from_slice(&IFA_ADDRESS.to_ne_bytes());
+    p.extend_from_slice(&ip.octets());
     p
 }
 
@@ -217,6 +272,38 @@ pub fn parse_addrs(msgs: &[(u16, Vec<u8>)], index: u32) -> Vec<(Ipv4Addr, u8)> {
         }
         if let Some(a) = local.or(address) {
             out.push((a, p[1]));
+        }
+    }
+    out
+}
+
+/// An IPv6 address on an interface, as rtnetlink lists it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Addr6 {
+    pub addr: Ipv6Addr,
+    pub prefix_len: u8,
+    /// `IFA_F_*` (the `IFA_FLAGS` attribute when present, else the header's).
+    pub flags: u32,
+}
+
+/// Interface `index`'s IPv6 addresses, in order, among RTM_NEWADDR messages.
+pub fn parse_addrs6(msgs: &[(u16, Vec<u8>)], index: u32) -> Vec<Addr6> {
+    let mut out = Vec::new();
+    for (ty, p) in msgs {
+        if *ty != RTM_NEWADDR || p.len() < 8 || p[0] != libc::AF_INET6 as u8 || u32_at(p, 4) != index {
+            continue;
+        }
+        let (mut local, mut address, mut flags) = (None, None, p[2] as u32);
+        for (t, d) in attrs(&p[8..]) {
+            match (t, d.len()) {
+                (IFA_LOCAL, 16) => local = Some(Ipv6Addr::from(<[u8; 16]>::try_from(d).unwrap_or_default())),
+                (IFA_ADDRESS, 16) => address = Some(Ipv6Addr::from(<[u8; 16]>::try_from(d).unwrap_or_default())),
+                (IFA_FLAGS, 4) => flags = u32_at(d, 0),
+                _ => {}
+            }
+        }
+        if let Some(addr) = local.or(address) {
+            out.push(Addr6 { addr, prefix_len: p[1], flags });
         }
     }
     out
@@ -349,6 +436,40 @@ fn send_garp(index: u32, mac: [u8; 6], ip: Ipv4Addr) -> io::Result<()> {
     Ok(())
 }
 
+// ── unsolicited Neighbor Advertisement (IPv6) ──────────────────────────────
+
+/// All-nodes link-local multicast, where an unsolicited NA goes (RFC 4861).
+const ALL_NODES: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
+
+/// An unsolicited Neighbor Advertisement for `target` at `mac` (RFC 4861
+/// §4.4, §7.2.6): ICMPv6 type 136, the Override flag (not Solicited, not
+/// Router), and the target link-layer address option, so every neighbour
+/// that has an entry for the VIP moves it to this MAC. The checksum is left
+/// zero: the kernel fills it on a raw ICMPv6 socket.
+pub fn na_packet(mac: [u8; 6], target: Ipv6Addr) -> [u8; 32] {
+    let mut p = [0u8; 32];
+    p[0] = 136; // Neighbor Advertisement
+    p[4] = 0x20; // R=0, S=0, O=1
+    p[8..24].copy_from_slice(&target.octets());
+    p[24] = 2; // Target Link-Layer Address
+    p[25] = 1; // length, in 8-octet units
+    p[26..32].copy_from_slice(&mac);
+    p
+}
+
+/// Send one unsolicited NA for `target` to ff02::1 on interface `index`, hop
+/// limit 255 (receivers drop any other, RFC 4861 §7.1.2), from the
+/// interface's link-local address (the kernel's choice for ff02::1).
+fn send_na(index: u32, mac: [u8; 6], target: Ipv6Addr) -> io::Result<()> {
+    use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+    let sock = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))?;
+    sock.set_multicast_if_v6(index)?;
+    sock.set_multicast_hops_v6(255)?;
+    sock.set_multicast_loop_v6(false)?;
+    let dst = SockAddr::from(SocketAddrV6::new(ALL_NODES, 0, 0, index));
+    sock.send_to(&na_packet(mac, target), &dst).map(|_| ())
+}
+
 #[cfg(test)]
 pub mod mock {
     use super::*;
@@ -402,6 +523,57 @@ mod tests {
     }
 
     #[test]
+    fn an_ipv6_address_request_is_a_128_without_dad() {
+        let ip: Ipv6Addr = "fd09::100".parse().unwrap();
+        let p = addr_payload6(7, ip);
+        assert_eq!(&p[..4], &[libc::AF_INET6 as u8, 128, IFA_F_NODAD, 0]);
+        assert_eq!(u32_at(&p, 4), 7);
+        assert_eq!(attrs(&p[8..]), vec![(IFA_ADDRESS, &ip.octets()[..])]);
+        assert_eq!(p.len() % 4, 0);
+    }
+
+    #[test]
+    fn ipv6_addresses_parse_with_their_flags() {
+        let msg = |idx: u32, ip: &str, len: u8, hdr_flags: u8, attr_flags: Option<u32>| {
+            let mut p = addr_payload6(idx, ip.parse().unwrap());
+            p[1] = len;
+            p[2] = hdr_flags;
+            if let Some(f) = attr_flags {
+                p.extend_from_slice(&8u16.to_ne_bytes());
+                p.extend_from_slice(&IFA_FLAGS.to_ne_bytes());
+                p.extend_from_slice(&f.to_ne_bytes());
+            }
+            (RTM_NEWADDR, p)
+        };
+        let msgs = vec![
+            msg(3, "fd09::1", 64, 0, None),
+            msg(3, "fe80::1", 64, 0x40, Some(0x40)),
+            msg(4, "fe80::4", 64, 0, None),
+            msg(3, "fe80::2", 64, 0, Some(0x80)),
+            // An IPv4 address on the same interface is not listed.
+            (RTM_NEWADDR, addr_payload(3, Ipv4Addr::new(10, 0, 0, 1))),
+        ];
+        let a = parse_addrs6(&msgs, 3);
+        assert_eq!(a.len(), 3);
+        assert_eq!(a[0], Addr6 { addr: "fd09::1".parse().unwrap(), prefix_len: 64, flags: 0 });
+        assert_eq!(a[1].flags, IFA_F_TENTATIVE, "tentative: skipped as a VRRP source");
+        assert_eq!(a[2], Addr6 { addr: "fe80::2".parse().unwrap(), prefix_len: 64, flags: 0x80 });
+        assert!(is_link_local(&a[1].addr) && is_link_local(&"febf::1".parse().unwrap()));
+        assert!(!is_link_local(&a[0].addr) && !is_link_local(&Ipv6Addr::LOCALHOST));
+    }
+
+    #[test]
+    fn the_neighbor_advertisement_overrides_with_our_mac() {
+        let target: Ipv6Addr = "fd09::100".parse().unwrap();
+        let p = na_packet([2, 0, 0, 0, 0, 9], target);
+        assert_eq!(p[0], 136);
+        assert_eq!(p[1], 0);
+        assert_eq!(p[4], 0x20, "override only: unsolicited, not a router");
+        assert_eq!(&p[8..24], &target.octets());
+        assert_eq!(&p[24..32], &[2, 1, 2, 0, 0, 0, 0, 9]);
+    }
+
+    #[test]
     fn links_and_addresses_parse_from_messages() {
         // RTM_NEWLINK for index 3 "eth0" with a MAC.
         let mut l = vec![0u8; 16];
@@ -441,6 +613,8 @@ mod tests {
         let l = link("lo").unwrap();
         assert_eq!(l.mac, [0; 6]);
         assert_eq!(interface_ipv4("lo").unwrap(), Ipv4Addr::LOCALHOST);
+        // `lo` has ::1 (or no IPv6 at all), never a link-local.
+        assert!(interface_ipv6_link_local("lo").is_err());
         assert!(link("no-such-if0").is_err());
     }
 }
