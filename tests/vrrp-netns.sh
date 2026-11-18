@@ -59,7 +59,9 @@ done
 ns "$NA" sh -c 'echo 1 > /proc/sys/net/ipv4/conf/va/arp_accept' 2>/dev/null || echo "note: arp_accept not settable"
 NA6=1
 if [ "$HAVE6" = 1 ]; then
-    ns "$NA" sh -c 'echo 1 > /proc/sys/net/ipv6/conf/va/accept_untracked_na' 2>/dev/null || {
+    # Linux makes an entry from an untracked NA only on a router (RFC 9131:
+    # accept_untracked_na and forwarding both on); a host learns by asking.
+    ns "$NA" sh -c 'echo 1 > /proc/sys/net/ipv6/conf/va/forwarding && echo 1 > /proc/sys/net/ipv6/conf/va/accept_untracked_na' 2>/dev/null || {
         NA6=0; echo "note: accept_untracked_na not settable (kernel < 5.19): IPv6 check 3 skipped"; }
 fi
 

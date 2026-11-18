@@ -356,8 +356,9 @@ adds `<vip>/128` with `nodad` (usable at once: the election already decided
 the owner) and sends three unsolicited Neighbor Advertisements (Override
 set, target link-layer address = the interface MAC) to `ff02::1`, hop limit
 255, on a raw ICMPv6 socket. A neighbour that has an entry for the VIP moves
-it at once; one without an entry learns it by asking (unless it accepts
-untracked NAs). Release deletes the address. Both are idempotent. No `ip`,
+it at once; one without an entry learns it by asking (Linux creates an
+entry from an untracked NA only on a router with `accept_untracked_na`,
+RFC 9131). Release deletes the address. Both are idempotent. No `ip`,
 `arping` or `ndsend` binary is used, so the golden needs none. It needs
 `CAP_NET_ADMIN` (the address) and `CAP_NET_RAW` (the VRRP, ARP and ICMPv6
 sockets).
@@ -566,9 +567,10 @@ once with an IPv4 VIP and once with an IPv6 one (`fd09::100`, #39):
 takeover after master-down, preemption by the higher priority, the
 gratuitous ARP / unsolicited NA updating the peer's neighbour entry, a
 resign on no healthy backend, preempting back, and priority 0 on removal
-cutting the takeover to about a second. (The IPv6 neighbour check needs
-`accept_untracked_na`, kernel 5.19+; on an older kernel it is skipped and
-says so.)
+cutting the takeover to about a second. (The IPv6 neighbour check turns on
+`forwarding` and `accept_untracked_na` on the observer's veth, since Linux
+only makes an entry from an untracked NA on a router; kernel 5.19+, and on
+an older kernel it is skipped and says so.)
 
 ```
 sc-build 'cargo build --release --locked && tests/vrrp-netns.sh'
