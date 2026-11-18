@@ -644,7 +644,10 @@ What the code does not do yet, which older docs implied it did:
 - [stormcert#69](https://github.com/glennswest/stormcert/issues/69):
   stormcert can't renew the router's wildcard pair (it re-issues it on
   every pass), so stormcos's renew check skips `router.crt` until then.
-- Earlier follow-ups: 4-octet ASNs and multiprotocol BGP. VRRP over IPv6
-  is not implemented. VRRP's `CAP_NET_ADMIN` and `CAP_NET_RAW` come from
+- [#39](https://github.com/glennswest/stormlb/issues/39): VRRP is IPv4
+  only; a `vrrp` spec on an IPv6 address is refused.
+- [#40](https://github.com/glennswest/stormlb/issues/40): BGP speaks
+  2-octet ASNs and IPv4 unicast only; a `local_asn` above 65535 is refused.
+- VRRP's `CAP_NET_ADMIN` and `CAP_NET_RAW` come from
   stormpump keeping every capability for a container today. Once stormpump#47
   sets a default, stormlb's spec must ask for both.

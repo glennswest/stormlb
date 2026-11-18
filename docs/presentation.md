@@ -109,7 +109,7 @@ Unit-tested; `tests/balancer.rs` drives round-robin and failover through the rea
 | TLS on `:443` (`[router.tls]`: SNI, reload, 308 from `:80`) | **done** (#14); on in the golden (#21) with stormcos#363's pair |
 | TLS to HTTPS-only backends (stormcos#81) | **done** (#13): `storm.io/backend-protocol: https`, verified against `backend_ca_file`, set in the golden (the node CA) |
 | Running the test container on test machines | runner shipped (`stormcentral test run`); `test/requires.toml` declares `host_network` (all suites) and the `nodes` read (`long`), `test/build.sh` builds the binary: **ready, not yet run on a test machine** |
-| 4-octet ASNs, MP-BGP, IPv6 | follow-ups |
+| 4-octet ASNs, MP-BGP (#40), VRRP over IPv6 (#39) | refused by the config today |
 | Wildcard hosts, path/header matches, 502 on a dead backend | not done (router) |
 | Sub-second VRRP failover (config takes whole seconds) | not possible today |
 

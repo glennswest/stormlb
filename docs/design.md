@@ -91,7 +91,8 @@ the network.
   60 s keepalive tick (#6). It also needs the session Established and
   enforces the negotiated hold time, so a dead peer is noticed within that
   time, not only when TCP fails.
-- 4-octet ASNs, multiprotocol BGP and IPv6 are follow-ups.
+- 2-octet ASNs and IPv4 unicast only; a larger ASN is refused at start.
+  4-octet ASNs and multiprotocol BGP are #40, VRRP over IPv6 is #39.
 
 **VRRP ownership follows health, not just liveness** (#7). Plain VRRP moves
 the VIP only when its holder stops advertising. A holder whose backends are

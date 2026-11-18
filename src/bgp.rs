@@ -15,8 +15,9 @@
 //! NOTIFICATION and the session is dropped. Announce and withdraw follow
 //! `advertise` as it changes, not on the keepalive tick.
 //!
-//! Scope: 2-byte ASNs (private ASNs < 65536 — the on-prem norm); 4-octet ASN
-//! capability is a follow-up. IPv4 unicast only.
+//! Scope: 2-byte ASNs (private ASNs < 65536 — the on-prem norm) and IPv4
+//! unicast; the preflight refuses a larger ASN. 4-octet ASNs and MP-BGP are
+//! stormlb#40.
 
 use crate::config::BgpCfg;
 use anyhow::{Context, Result};
