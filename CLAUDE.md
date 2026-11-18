@@ -417,3 +417,16 @@ deliberate commit of its own.
       e8dee08 (ports, already documented). Fixed: VIP port 7443 / stormcluster
       is the client (#28 text), gap #34 (stormfn 9109) listed. #28 can close
       once pushed; open: #21, #32, #33, #34 (P?), #24-#27, #29.
+- [ ] #37 (P0) LoadBalancer Services + HTTPRoute backend config (storefront).
+      2026-11-18: parked on an owner decision (wait-owner). Items 1–2 (stormlb
+      allocates LB addresses, writes status, one VIP per Service) conflict
+      with stormcos#215 option A (owner, 2026-10-06): Cilium LB-IPAM + L2
+      announcements own LoadBalancer Services, live since 12.21
+      (stormcentral#498/#922). Asked A (keep #215; stormlb does item 3), B
+      (stormlb only for loadBalancerClass storm.io/stormlb), C (replace
+      Cilium LB-IPAM). Recommended A. Item 3 under any answer: router config
+      from HTTPRoutes: host+path matches, per-request routing (#26),
+      weighted backendRefs → EndpointSlices, per-backend health (readiness
+      or annotation), timeouts/retries, HTTPRoute status, per-backend
+      metrics. File: storefront spread checks (stormstorefront), console
+      page (stormconsole), sc columns (sc).
