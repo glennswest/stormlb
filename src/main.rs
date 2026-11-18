@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use stormlb::vips::{Registry, CONFIG_VIP};
@@ -60,10 +60,11 @@ async fn main() -> Result<()> {
         reg.start_config(spec)?;
     }
 
-    // L3: every node with a healthy backend advertises the config VIP's /32.
+    // L3: every node with a healthy backend advertises the config VIP's host
+    // route (/32 or /128, #40).
     if let (true, Some(v)) = (cfg.bgp.enabled, &cfg.vip) {
-        let vip: Ipv4Addr = v.address.parse().map_err(|_| anyhow::anyhow!("bgp needs vip.address to be IPv4"))?;
-        match bgp::preflight(&cfg.bgp) {
+        let vip: IpAddr = v.address.parse().map_err(|_| anyhow::anyhow!("bgp: vip.address {:?} is not an IP address", v.address))?;
+        match bgp::preflight(&cfg.bgp, vip) {
             Ok(next_hop) => {
                 // Health → advertise, every 250 ms: a session announces or
                 // withdraws as soon as this changes (#6).

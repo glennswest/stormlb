@@ -172,13 +172,20 @@ pub struct BgpCfg {
     pub enabled: bool,
     #[serde(default)]
     pub local_asn: u32,
+    /// The BGP identifier (a dotted quad), and the IPv4 VIP's next-hop
+    /// unless `next_hop` is set.
     #[serde(default)]
     pub router_id: String,
+    /// The next-hop advertised for the VIP, in the VIP's family. Default
+    /// `router_id`; an IPv6 VIP needs this node's global IPv6 here (#40).
+    #[serde(default)]
+    pub next_hop: Option<String>,
     #[serde(default)]
     pub peers: Vec<BgpPeer>,
 }
 #[derive(Debug, Deserialize, Clone)]
 pub struct BgpPeer {
+    /// The peer's address, IPv4 or IPv6.
     pub address: String,
     /// The peer's AS; its OPEN must carry it, or the session is refused.
     pub asn: u32,
