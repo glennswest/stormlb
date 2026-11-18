@@ -461,3 +461,17 @@ deliberate commit of its own.
     resign ~1.1 s, priority-0 handover ~1.1 s), test crate. One earlier
     run at 6ee5b5f missed the IPv6 neighbour entry once; its rerun and the
     3 runs since passed. #39 closed, image requested.
+- [ ] #40 (P3) BGP: 4-octet ASNs (RFC 6793) and MP-BGP IPv6 (RFC 4760).
+  - [ ] OPEN carries Capabilities: Multiprotocol (the VIP's AFI/SAFI 1) and
+        4-octet AS (65); My AS = local_asn, or AS_TRANS 23456 above 65535.
+  - [ ] Peer OPEN: parse optional params (RFC 9072 extended too); its AS is
+        the 4-octet capability's when sent. A configured peer AS > 65535
+        from a peer without it: Bad Peer AS. An IPv6 VIP and a peer that
+        did not offer AFI 2/SAFI 1: Unsupported Capability (2/7).
+  - [ ] AS_PATH 4-byte to a 4-octet peer; to an old one 2-byte with
+        AS_TRANS + AS4_PATH (17) when local_asn > 65535.
+  - [ ] IPv6 VIP: MP_REACH_NLRI (14: AFI 2, SAFI 1, next-hop, /128) and
+        MP_UNREACH_NLRI (15). `[bgp] next_hop` (default router_id; IPv6
+        required for an IPv6 VIP). Peers may be IPv6 addresses.
+  - [ ] preflight: ASNs 1..4294967294 except 23456; tests/bgp.rs fake peer
+        with both capabilities; docs, CHANGELOG; sc-build, image, close #40.
