@@ -15,6 +15,9 @@
   link-local; documented). `tests/vrrp-netns.sh` runs its six checks for
   IPv4 and then IPv6; unit tests for the IPv6 codec, pseudo-header, hop
   limit, NA packet and netlink payloads.
+  The IPv6 neighbour check runs the observing veth with `forwarding` and
+  `accept_untracked_na` on: Linux creates an entry from an untracked NA
+  only on a router (RFC 9131).
 - **docs:** no stub markers left (#38): VRRP over IPv6 and BGP 4-octet
   ASNs / MP-BGP are documented as refused by the config, with their gaps
   filed as #39 and #40 (README gaps, design.md, deck, bgp.rs module doc).

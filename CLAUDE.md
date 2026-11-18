@@ -436,19 +436,28 @@ deliberate commit of its own.
       README, design.md, deck, bgp.rs doc, CHANGELOG; sc-build doc build.
       Done: sc-build passed at da7ced4 (release, tests, clippy, doc; first
       run a flake, not filed); #38 closed; image build 536e73a05ebf.
-- [ ] #39 (P3) VRRP over IPv6 (RFC 5798 VRRPv3 for IPv6).
-  - [ ] vrrp.rs generic over the family: AF_INET6 raw IPPROTO_VRRP socket
+- [x] #39 (P3) VRRP over IPv6 (RFC 5798 VRRPv3 for IPv6).
+  - [x] vrrp.rs generic over the family: AF_INET6 raw IPPROTO_VRRP socket
         bound to the interface's link-local, joined to ff02::12, hop limit
         255 (checked on receive via IPV6_RECVHOPLIMIT), checksum over the
         IPv6 pseudo-header; tie-break on the peer's link-local. The address
         list carries the VIP (no virtual MAC, so no virtual link-local:
         documented deviation from §5.2.9, as the node MAC is for IPv4).
-  - [ ] vip.rs: RTM_NEWADDR/DELADDR AF_INET6 `<vip>/128` with IFA_F_NODAD
+  - [x] vip.rs: RTM_NEWADDR/DELADDR AF_INET6 `<vip>/128` with IFA_F_NODAD
         (usable at once), link-local lookup, unsolicited Neighbor
         Advertisement (override, target link-layer option) to ff02::1 in
         place of the gratuitous ARP.
-  - [ ] vips.rs: drop "vrrp needs an IPv4 address"; unit tests (codec,
+  - [x] vips.rs: drop "vrrp needs an IPv4 address"; unit tests (codec,
         pseudo-header, NA frame, address payloads, `lo` ::1 is not link-local).
-  - [ ] tests/vrrp-netns.sh: an IPv6 pass (same six checks on fd09::100).
-  - [ ] Docs (README VRRP/API/gaps, design, deck), CHANGELOG; sc-build,
+  - [x] tests/vrrp-netns.sh: an IPv6 pass (same six checks on fd09::100).
+  - [x] Docs (README VRRP/API/gaps, design, deck), CHANGELOG; sc-build,
         image, close #39.
+  - Done in eb72f11 (code), 6ee5b5f (docs), 6515338 (test: the IPv6
+    neighbour check observes with forwarding + accept_untracked_na, RFC
+    9131). sc-build passed at 6515338 (Fedora 44, kernel 7.2.11): release
+    build, 49 unit + every integration test, clippy and cargo doc -D
+    warnings, tests/vrrp-netns.sh 3 runs (6 IPv4 + 6 IPv6 checks each:
+    takeover 3.6 s, preempt 3.2 s, NA in the peer's neighbour table,
+    resign ~1.1 s, priority-0 handover ~1.1 s), test crate. One earlier
+    run at 6ee5b5f missed the IPv6 neighbour entry once; its rerun and the
+    3 runs since passed. #39 closed, image requested.
