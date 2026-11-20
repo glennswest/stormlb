@@ -459,6 +459,10 @@ deliberate commit of its own.
         2c35ac41be24.
   - [ ] #37's proof (edge-lb's LoadBalancer address) is flowsdn's:
         proposed --after flowsdn#475. Not yet run on a node.
+        2026-11-19: flowsdn#475 shipped (stage bef7524486e3); the address
+        also needs stormcos#385 (pool + L2 policy on the flowsdn flavor):
+        proposed --after stormcos#385 too. ETP Local spread note sent to
+        stormstorefront#6. Then: proof on a node, close #37.
 - [x] #38 (P-1) no stubs: README said VRRP over IPv6 was a stub.
       The config already refuses both (vrrp on an IPv6 address; BGP ASN >
       65535), so docs now say "refused" and the gaps are #39, #40 (P3).
