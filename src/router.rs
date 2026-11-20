@@ -731,7 +731,7 @@ async fn attempts(
             Err(Sent::Unsent(req, e)) => {
                 // A kept connection the backend had closed: the request was
                 // never written, so it goes out again on a fresh one.
-                first = Some(req);
+                first = Some(*req);
                 tried.pop();
                 stale += 1;
                 last = e;
@@ -758,7 +758,7 @@ async fn attempts(
 /// How sending one request on one connection ended, short of a response.
 enum Sent {
     /// Not written (the connection was already closed): the request back.
-    Unsent(Request<Body>, String),
+    Unsent(Box<Request<Body>>, String),
     Failed(String),
     TimedOut(Duration),
 }
@@ -769,7 +769,7 @@ async fn send(
     timeout: Option<Duration>,
 ) -> Result<(Response<Incoming>, client_http1::SendRequest<Body>), Sent> {
     if s.ready().await.is_err() {
-        return Err(Sent::Unsent(req, "the kept connection had closed".into()));
+        return Err(Sent::Unsent(Box::new(req), "the kept connection had closed".into()));
     }
     let fut = s.try_send_request(req);
     let r = match timeout {
@@ -782,7 +782,7 @@ async fn send(
     match r {
         Ok(resp) => Ok((resp, s)),
         Err(mut e) => match e.take_message() {
-            Some(req) => Err(Sent::Unsent(req, e.into_error().to_string())),
+            Some(req) => Err(Sent::Unsent(Box::new(req), e.into_error().to_string())),
             None => Err(Sent::Failed(e.into_error().to_string())),
         },
     }

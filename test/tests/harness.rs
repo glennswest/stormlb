@@ -5,10 +5,10 @@
 //!
 //! The apiserver here does only what the router and the suites use:
 //! HTTPRoutes, Services and Endpoints by namespace (create, get, list by
-//! label, replace, delete), the all-namespaces HTTPRoute list, and one Node.
-//! A Service's clusterIP is 127.0.0.1, so the "Service data plane" is the
-//! service port itself — which is why the suite gives the Service the
-//! backend's own port.
+//! label, replace, delete), an HTTPRoute's `status` (merge-patch), the
+//! all-namespaces lists of HTTPRoutes, Services, Endpoints and
+//! EndpointSlices (always empty: the router then reads Endpoints, as for a
+//! selectorless Service), and one Node. A Service's clusterIP is 127.0.0.1.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -80,9 +80,16 @@ async fn serve(mut s: TcpStream, store: Store) -> std::io::Result<()> {
 
 fn handle(method: &str, path: &str, query: &str, body: Value, store: &Store) -> (u16, Value) {
     let mut db = store.lock().unwrap();
-    if method == "GET" && path == "/apis/gateway.networking.k8s.io/v1/httproutes" {
-        let items: Vec<Value> = db.iter().filter(|(k, _)| k.contains("/httproutes/")).map(|(_, v)| v.clone()).collect();
-        return (200, json!({"items": items}));
+    for (all, kind) in [
+        ("/apis/gateway.networking.k8s.io/v1/httproutes", "/httproutes/"),
+        ("/api/v1/services", "/services/"),
+        ("/api/v1/endpoints", "/endpoints/"),
+        ("/apis/discovery.k8s.io/v1/endpointslices", "/endpointslices/"),
+    ] {
+        if method == "GET" && path == all {
+            let items: Vec<Value> = db.iter().filter(|(k, _)| k.contains(kind)).map(|(_, v)| v.clone()).collect();
+            return (200, json!({"items": items}));
+        }
     }
     if method == "GET" && path == "/api/v1/nodes" {
         return (
@@ -99,6 +106,14 @@ fn handle(method: &str, path: &str, query: &str, body: Value, store: &Store) -> 
     let (coll, kind, name) = match parts.as_slice() {
         [ns, kind] => (format!("{prefix}/namespaces/{ns}/{kind}"), *kind, None),
         [ns, kind, name] => (format!("{prefix}/namespaces/{ns}/{kind}"), *kind, Some(*name)),
+        [ns, "httproutes", name, "status"] if method == "PATCH" => {
+            let key = format!("{prefix}/namespaces/{ns}/httproutes/{name}");
+            let Some(obj) = db.get_mut(&key) else {
+                return (404, json!({"message": "not found"}));
+            };
+            obj["status"] = body["status"].clone();
+            return (200, obj.clone());
+        }
         _ => return (404, json!({"message": format!("no {path}")})),
     };
     if !["httproutes", "services", "endpoints"].contains(&kind) {

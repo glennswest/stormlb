@@ -131,7 +131,8 @@ async fn metrics_count_what_the_router_did() {
     assert!(send(http, &get("nobody.test", "/")).await.starts_with("HTTP/1.1 404"));
     assert!(send(http, b"GET / HTTP/1.1\r\n\r\n").await.starts_with("HTTP/1.1 400"));
     assert!(send(http, &get("127.0.0.1", "/healthz")).await.starts_with("HTTP/1.1 200"));
-    assert_eq!(send(http, &get("dead.test", "/")).await, "", "a dead backend closes with no response");
+    let r = send(http, &get("dead.test", "/")).await;
+    assert!(r.starts_with("HTTP/1.1 502") && r.contains("dead.test"), "a dead backend is a 502 naming the host: {r}");
 
     let m = send(mport, &get("x", "/metrics")).await;
     let (head, text) = m.split_once("\r\n\r\n").unwrap();
@@ -143,7 +144,7 @@ async fn metrics_count_what_the_router_did() {
     assert_eq!(d(r#"stormlb_router_requests_total{host="unrouted",code="404"}"#), 1.0);
     assert_eq!(d(r#"stormlb_router_requests_total{host="unrouted",code="400"}"#), 1.0);
     assert_eq!(d(r#"stormlb_router_requests_total{host="unrouted",code="200"}"#), 1.0);
-    assert_eq!(d(r#"stormlb_router_requests_total{host="dead.test",code="error"}"#), 1.0);
+    assert_eq!(d(r#"stormlb_router_requests_total{host="dead.test",code="502"}"#), 1.0);
     assert_eq!(d(r#"stormlb_router_upstream_errors_total{host="dead.test",kind="connect"}"#), 1.0);
     assert_eq!(d(r#"stormlb_router_request_duration_seconds_count{host="app.test"}"#), 2.0);
     assert_eq!(d(r#"stormlb_router_request_duration_seconds_bucket{host="app.test",le="+Inf"}"#), 2.0);

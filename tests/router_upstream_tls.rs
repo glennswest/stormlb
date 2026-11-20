@@ -169,7 +169,7 @@ async fn https_backends_are_verified_against_the_ca_or_not_reached() {
         assert!(Instant::now() < end, "routes never loaded");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(get(port, "ip.test").await, "", "no CA loaded: nothing is sent to an https backend");
+    assert!(get(port, "ip.test").await.starts_with("HTTP/1.1 502"), "no CA loaded: nothing is sent to an https backend");
     assert!(tls_errors("ip.test") >= 1.0);
 
     // The CA appears: picked up on the next poll.
@@ -186,10 +186,10 @@ async fn https_backends_are_verified_against_the_ca_or_not_reached() {
     // Verified by the name the route gives (svc.test, also the SNI).
     assert!(get(port, "name.test").await.contains("Host: name.test"));
     // A name the certificate doesn't carry, and a backend signed by another
-    // CA: refused, nothing reaches the client.
+    // CA: refused, the client gets the router's 502.
     let before = tls_errors("rogue.test");
-    assert_eq!(get(port, "wrongname.test").await, "");
-    assert_eq!(get(port, "rogue.test").await, "");
+    assert!(get(port, "wrongname.test").await.starts_with("HTTP/1.1 502"));
+    assert!(get(port, "rogue.test").await.starts_with("HTTP/1.1 502"));
     assert!(tls_errors("wrongname.test") >= 1.0 && tls_errors("rogue.test") > before);
     // Without the annotation the dial is plain, as before: a TLS port answers
     // nothing usable.
