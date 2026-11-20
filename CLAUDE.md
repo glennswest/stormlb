@@ -517,17 +517,18 @@ deliberate commit of its own.
     sc-build passed at ad021dc: release build, 55 unit + every integration
     test, tests/bgp.rs 7 tests x4 runs, clippy and cargo doc -D warnings,
     test crate 12 + 3. Not tested against a real router (FRR/BIRD).
-- [ ] #42 (P2) cross-namespace backendRefs need a ReferenceGrant.
-  - [ ] routes.rs: `Objects.grants` (by namespace) + `grants_error`; a ref
-        whose namespace differs from the route's resolves only when a grant
-        in the target namespace has from {gateway.networking.k8s.io,
-        HTTPRoute, route ns} and to {"", Service, name unset or = svc};
-        otherwise `RefNotPermitted` (ResolvedRefs False, its share 500s).
-  - [ ] router.rs: list referencegrants (v1beta1, then v1) only when a
-        route has a cross-namespace ref; 404 = no grants; any other error
-        = refuse cross-namespace refs only (fail closed, same-namespace
-        routing unaffected). 401/403 text names referencegrants.
-  - [ ] Unit tests (grant allows, absence/wrong from/to/name refuses,
-        unreadable refuses), harness medium check, docs, CHANGELOG.
-  - [ ] rustkube serves no referencegrants (404 → every cross-namespace
-        ref refused): file there; RBAC list on referencegrants: tell stormcos#76.
+- [x] #42 (P2) cross-namespace backendRefs need a ReferenceGrant.
+  - [x] routes.rs: `Objects.grants` + `grants_error`; a ref into another
+        namespace resolves only with a grant there (from HTTPRoute in the
+        route's ns, to Service, name unset or = svc); else `RefNotPermitted`
+        (ResolvedRefs False, its share 500s).
+  - [x] router.rs: referencegrants (v1beta1, then v1) listed only when a
+        route has a cross-namespace ref; 404 = none; other errors refuse
+        those refs only (fail closed, the table still updates).
+  - [x] Unit tests (3), test crate medium `cross-namespace-refused` (26
+        checks), README, design.md, deck, CHANGELOG.
+  - [x] Filed rustkube#351 (serves no referencegrants, so on rustkube every
+        cross-namespace ref is refused); told stormcos#76 the RBAC verb.
+  - Done in 07e6248. sc-build passed there on a build VM: release build,
+    68 unit + every integration test, clippy and cargo doc -D warnings,
+    test crate 12 unit + 3 harness (medium 26). #42 closed, image requested.
