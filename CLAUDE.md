@@ -353,7 +353,7 @@ deliberate commit of its own.
       #25 (harness long wave flake), #26 (per-connection routing/metrics),
       #27 (test/ headers vs stormcentral#121 option B), #28 (VIP port decided,
       docs stale), all P3. Everything cross-component was already filed.
-- [ ] #21 (2026-11-07) shipped config: what the node now provides.
+- [x] #21 (2026-11-07) shipped config: what the node now provides.
       stormcos#363 is closed and validated (12.58 lineage): stormcos
       `stormcert-serving-router` mints `/data/stormcert/router.{crt,key}`
       (`*.storm1.g8.lo`, node name/address, localhost, 127.0.0.1) from the
@@ -381,8 +381,11 @@ deliberate commit of its own.
         `component build stormlb --no-wait`, `shipped`.
         2026-11-20: the master ran the `--file` edit; `component export`
         shows ca_file, [router.tls] router.crt/key, api :9109, metrics
-        :9111 (matches `parses_the_shipped_router_config`). Next: sc-build,
-        image, `shipped` with the router TLS log proof.
+        :9111 (matches `parses_the_shipped_router_config`). Code unchanged
+        since 07e6248 (sc-build passed); 7a8fb4b is docs only, its sc-build
+        stopped while ~80 deep in the line. Image build 69a77a7da2a0 at
+        7a8fb4b; `shipped` with proof `log:router TLS: loaded
+        /data/stormcert/router.crt` (closes on a test machine).
 - [x] #30 (P1) ports: `[api]` 9103 is sectionsystems', `[metrics]` 9104 is
       stormblock-csi's (stormcos#65); both bind the wildcard on the host
       network. Registry free 9109–9119; 9110 is stormcentral's own default.
