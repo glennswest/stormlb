@@ -517,3 +517,17 @@ deliberate commit of its own.
     sc-build passed at ad021dc: release build, 55 unit + every integration
     test, tests/bgp.rs 7 tests x4 runs, clippy and cargo doc -D warnings,
     test crate 12 + 3. Not tested against a real router (FRR/BIRD).
+- [ ] #42 (P2) cross-namespace backendRefs need a ReferenceGrant.
+  - [ ] routes.rs: `Objects.grants` (by namespace) + `grants_error`; a ref
+        whose namespace differs from the route's resolves only when a grant
+        in the target namespace has from {gateway.networking.k8s.io,
+        HTTPRoute, route ns} and to {"", Service, name unset or = svc};
+        otherwise `RefNotPermitted` (ResolvedRefs False, its share 500s).
+  - [ ] router.rs: list referencegrants (v1beta1, then v1) only when a
+        route has a cross-namespace ref; 404 = no grants; any other error
+        = refuse cross-namespace refs only (fail closed, same-namespace
+        routing unaffected). 401/403 text names referencegrants.
+  - [ ] Unit tests (grant allows, absence/wrong from/to/name refuses,
+        unreadable refuses), harness medium check, docs, CHANGELOG.
+  - [ ] rustkube serves no referencegrants (404 → every cross-namespace
+        ref refused): file there; RBAC list on referencegrants: tell stormcos#76.
