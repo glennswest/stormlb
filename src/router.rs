@@ -1280,7 +1280,9 @@ mod tests {
         let addr = serve(table(vec![json!({"metadata": {"namespace": "t", "name": "a", "annotations": {"storm.io/backend": a.to_string()}},
             "spec": {"hostnames": ["a.test"]}})]))
         .await;
-        assert!(exchange(addr, b"GET / HTTP/1.0\r\n\r\n").await.starts_with("HTTP/1.1 400"));
+        // An HTTP/1.0 client is answered in HTTP/1.0.
+        let r = exchange(addr, b"GET / HTTP/1.0\r\n\r\n").await;
+        assert!(r.starts_with("HTTP/1.0 400") && r.ends_with("this router needs a Host\n\n"), "{r}");
         let r = exchange(addr, b"GET / HTTP/1.1\r\nHost: nobody.test\r\n\r\n").await;
         assert!(r.starts_with("HTTP/1.1 404") && r.ends_with("no route for host nobody.test\n"), "{r}");
     }
