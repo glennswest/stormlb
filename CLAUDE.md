@@ -463,6 +463,10 @@ deliberate commit of its own.
         also needs stormcos#385 (pool + L2 policy on the flowsdn flavor):
         proposed --after stormcos#385 too. ETP Local spread note sent to
         stormstorefront#6. Then: proof on a node, close #37.
+        2026-11-20: both blockers shipped (stormcos 558c7c4, stormpump
+        981050f) but not installed; proposed --after-install
+        stormpump>=981050f@pvetest2 and flowsdn>=6a1ab6a@pvetest2 (the
+        flowsdn test machine; it needs a pool in its record, master's).
 - [x] #38 (P-1) no stubs: README said VRRP over IPv6 was a stub.
       The config already refuses both (vrrp on an IPv6 address; BGP ASN >
       65535), so docs now say "refused" and the gaps are #39, #40 (P3).
