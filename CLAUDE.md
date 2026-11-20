@@ -433,6 +433,46 @@ deliberate commit of its own.
       or annotation), timeouts/retries, HTTPRoute status, per-backend
       metrics. File: storefront spread checks (stormstorefront), console
       page (stormconsole), sc columns (sc).
+      2026-11-19 owner (relayed by the master): "stormlb#37 you need a
+      flowsdn solution" → not A-on-Cilium: LoadBalancer Services (address,
+      status, announcement, L4 spread, ETP Local) are flowsdn's (flowsdn#333
+      LB-IPAM + L2 announcer, #292 external LB); stormlb builds item 3.
+  - [ ] File flowsdn (storefront edge-lb end to end on flowsdn), and
+        stormstorefront (item 4 spread checks), stormconsole (router page).
+  - [ ] Router on hyper (server + client http1; `server` feature adds
+        httpdate to Cargo.lock: regenerate on the build box): per-request
+        routing (#26), Upgrade (101 + both upgraded streams spliced),
+        hop-by-hop headers stripped, X-Forwarded-Proto kept, 400/404/healthz/
+        308 bodies unchanged, 431 past the 16 KiB head (hyper max_buf_size).
+  - [ ] Table: host → rules (Gateway API precedence: Exact path, longest
+        PathPrefix, method, header count; ties oldest route then ns/name);
+        matches path Exact/PathPrefix, headers Exact, method; RegularExpression
+        refused (status ResolvedRefs/Accepted false with the reason).
+  - [ ] Backends: each backendRef → its Service's ready endpoints
+        (EndpointSlices by kubernetes.io/service-name, else Endpoints; the
+        Service port → target port by name), weight split, round-robin or
+        least-conn (`storm.io/balance` on the Service); no endpoint object
+        → the clusterIP (today's path); headless works. `storm.io/backend`
+        stays a single static backend. TLS per route as today.
+  - [ ] Health: readiness; `storm.io/health-check-path` (+ -interval,
+        -rise, -fall) on the Service → active HTTP checks per endpoint,
+        kept across polls; passive: a connect failure marks the endpoint
+        down until the next check/poll; connect failures retried on another
+        endpoint. No healthy endpoint → 503.
+  - [ ] Timeouts (`timeouts.request`, `backendRequest`) → 504; retries
+        (`retry.attempts`/`codes`) for bodyless requests.
+  - [ ] HTTPRoute status (merge-patch /status, only on change): our parent
+        entry (controllerName storm.io/stormlb) with Accepted, ResolvedRefs
+        and storm.io/BackendsHealthy; others' entries kept.
+  - [ ] Metrics per request + per backend (requests, healthy/total
+        endpoints); `GET /api/v1/routes` on the metrics listener (table,
+        backends, health) for the console.
+  - [ ] Tests (unit: precedence, weights, slices; integration: per-request,
+        weights, failover, status), test crate (sticky → per-request, dead
+        backend → 502/503, headless now served, head limit 431), harness
+        apiserver gains endpointslices + /status. Docs, CHANGELOG.
+  - [ ] sc-build, image; then #37 waits on flowsdn for the edge-lb proof:
+        propose --after the flowsdn issue.
 - [x] #38 (P-1) no stubs: README said VRRP over IPv6 was a stub.
       The config already refuses both (vrrp on an IPv6 address; BGP ASN >
       65535), so docs now say "refused" and the gaps are #39, #40 (P3).
