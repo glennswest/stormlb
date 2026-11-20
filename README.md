@@ -44,8 +44,8 @@ stormlb [--config <path>]
 | `-c`, `--config` | `STORMLB_CONFIG` | `/etc/stormlb/stormlb.toml` |
 
 Logging goes to stderr through `tracing`. The filter comes from `RUST_LOG`
-(default `info`). Per-connection failures (client gone, backend down) log at
-`debug`.
+(default `info`). Per-connection and per-request failures (client gone, backend down) log at
+`debug`; a backend's health changing logs at `info`/`warn`.
 
 At start it:
 
@@ -72,10 +72,10 @@ TOML. Unknown keys are ignored. A fuller example is in
 | Key | Default | Meaning |
 |---|---|---|
 | `listen` | `"0.0.0.0:80"` | Address to listen on. `"auto:<port>"` binds this node's routable IPv4 and `127.0.0.1` on `<port>`; see below. |
-| `apiserver` | `"https://127.0.0.1:6443"` | Where HTTPRoutes and Services are read from. |
+| `apiserver` | `"https://127.0.0.1:6443"` | Where HTTPRoutes, Services, Endpoints and EndpointSlices are read from, and route status is written. |
 | `poll_secs` | `5` (min 1) | Seconds between route-table refreshes. |
 | `backend_ca_file` | none | The CA (PEM) a route's backend must chain to when the route says `storm.io/backend-protocol: https`; on a node, the cluster CA `/data/stormcert/ca.crt`. Only these certificates are trusted, not the public roots. Re-read on the route poll when it changes, so it may appear after the router starts. Unset or not loadable: https backends' connections fail closed. |
-| `token_file` | none | The router's identity (#9): a file holding a bearer token, its ServiceAccount's, which stormcos mints with get/list/watch on HTTPRoutes and Services (stormcos#76 step 2). It's sent as `Authorization: Bearer` and re-read on every poll, so it can be rotated in place. Set but missing or empty: no refresh is made, and the last table keeps serving. Unset: anonymous, as before. |
+| `token_file` | none | The router's identity (#9): a file holding a bearer token, its ServiceAccount's, which stormcos mints (stormcos#76 step 2) with list on HTTPRoutes, Services, Endpoints and EndpointSlices and patch on `httproutes/status` (#37). It's sent as `Authorization: Bearer` and re-read on every poll, so it can be rotated in place. Set but missing or empty: no refresh is made, and the last table keeps serving. Unset: anonymous, as before. |
 | `ca_file` | none | The CA (PEM) the apiserver's certificate must chain to, on a node `/data/stormcert/ca.crt` (#10). Only it is trusted, not public roots. Re-read when it changes, so it may appear after the router starts. When set, `insecure` is ignored. |
 | `insecure` | `true` | Without `ca_file`: accept the apiserver's certificate unverified. `false` without `ca_file` trusts only the public roots compiled in, which refuses stormcert's certificate. |
 
@@ -176,60 +176,149 @@ it logs `bgp disabled: …` and everything else keeps running.
 
 ### Router
 
-- Reads **one request head** (limit 16 KiB), takes the `Host` header
-  (lowercased, port stripped) and looks it up. It then replays the head to
-  the backend and splices bytes both ways. After the head it is just a wire,
-  so keep-alive, chunked bodies, websockets and SSE work. Routing is
-  **per connection**: a keep-alive connection that later names another host
-  stays on the first backend.
-- **The route table** is `GET {apiserver}/apis/gateway.networking.k8s.io/v1/httproutes`
-  (all namespaces), polled every `poll_secs` with a 10 s timeout. On error it
-  keeps the last good table (a refusal is logged once per distinct error,
-  and a 401/403 says the router needs get/list on HTTPRoutes and get on
-  Services). With `token_file` it reads as its own ServiceAccount (#9);
-  without it, anonymously, which works only where anonymous may list
-  HTTPRoutes, i.e. the stormcos `sno` and `bastion` apiservers with
-  `--dev-anonymous-admin`. With `ca_file` the apiserver is verified against
-  the cluster CA (#10). The golden sets `ca_file` (`/data/stormcert/ca.crt`,
-  #21) but no `token_file` yet: the token is stormcos's (stormcos#76;
-  stormlb#33), so the shipped router still reads anonymously.
-  Every `spec.hostnames` entry maps to one backend:
-  1. the `storm.io/backend` annotation, `host:port` verbatim. This is how a
-     node service routes: `127.0.0.1:9094` is "this node's console" on every
-     node.
-  2. otherwise `spec.rules[0].backendRefs[0]`, resolved via
-     `GET /api/v1/namespaces/{ns}/services/{name}` to `clusterIP:port` (port
-     default 80, namespace default = the route's). A headless or missing
-     Service skips the route with a warning.
+An HTTP/1.1 reverse proxy over Gateway API HTTPRoutes (#37), hyper on both
+sides. **Every request is routed on its own** (#26), including several on
+one keep-alive connection. It is matched on host, path, method, headers and
+query against the routes' rules, and sent to an endpoint of the backend
+that the rule's weights pick.
 
-  Either way, `storm.io/backend-protocol` says how to reach it: `http`
-  (the default) or `https`. With `https` the router dials TLS (ALPN
-  `http/1.1`) and verifies the backend against `backend_ca_file`, for the
-  address's IP (an IP SAN) or for `storm.io/backend-server-name` if the
-  route sets it (also sent as SNI). Any other value skips the route with a
-  warning.
-- Matching is **exact hostname only**. There are no wildcard hostnames, no
-  path/header matches, and no rules or backendRefs beyond the first.
-- Responses of its own:
-  - `400` if there is no `Host`.
-  - `404` `no route for host <h>` for a host no route claims.
-  - `200` `router alive` for `GET /healthz` on any host no route claims.
-    A host a route does claim gets its `/healthz` proxied to the backend.
-  - If a backend can't be dialled, the connection closes with no response
-    (logged at `debug`). There is no 502.
-- **TLS on either side.** With `[router.tls]`, a second listener
-  terminates TLS (ALPN `http/1.1`) and feeds the same demux. The head sent
-  to the backend gains `X-Forwarded-Proto: https`, and any
-  `X-Forwarded-Proto` the client sent is dropped. Plain-HTTP requests carry
-  the head unchanged. Toward the backend, a route marked
-  `storm.io/backend-protocol: https` gets TLS verified against
-  `backend_ca_file` (#13), so an HTTPS-only backend (the apiserver,
-  cadvisor under stormcos#81) can sit behind a route. Verification fails
-  closed: with no CA loaded, a name the certificate lacks, or another CA's
-  certificate, nothing is sent and the client's connection closes
-  (`stormlb_router_upstream_errors_total{kind="tls"}`). A client's
-  `Authorization` header is passed through untouched, so bearer-guarded
-  backends need nothing more. The router presents no client certificate.
+- **The table** is built every `poll_secs` (10 s timeout) from cluster-wide
+  lists: `GET {apiserver}/apis/gateway.networking.k8s.io/v1/httproutes`,
+  and only when some route has a `backendRef`, `/api/v1/services`,
+  `/apis/discovery.k8s.io/v1/endpointslices` and `/api/v1/endpoints`. That
+  is four requests a poll, however many routes. A list the apiserver does not
+  serve (404) is treated as empty. Any other failure keeps the last good
+  table, logged once per distinct error; a 401/403 names the verbs the
+  router needs (list on those four, patch on `httproutes/status`).
+  - With `token_file` the router reads as its own ServiceAccount (#9).
+    Without it, it reads anonymously, which works only where anonymous may
+    list, i.e. the stormcos `sno` and `bastion` apiservers with
+    `--dev-anonymous-admin`.
+  - With `ca_file` the apiserver is verified against the cluster CA (#10).
+    The golden sets `ca_file` (`/data/stormcert/ca.crt`, #21) but no
+    `token_file` yet: the token is stormcos's (stormcos#76; stormlb#33), so
+    the shipped router still reads anonymously.
+- **Hostnames**: exact names first, then wildcards (`*.example.com` covers
+  `a.example.com` and `a.b.example.com`, not `example.com`). Among wildcards
+  the longest suffix wins. Only the rules under the most specific matching
+  hostname are considered. Host is lowercased and its port dropped. A route
+  with no `hostnames` serves nothing.
+- **Matches**:
+  - path `Exact` or `PathPrefix`, element-wise (`/api` matches `/api` and
+    `/api/x`, not `/apix`), compared undecoded;
+  - `method`;
+  - `headers` and `queryParams` of type `Exact`.
+
+  A rule without `matches` is `PathPrefix /`. Precedence is the Gateway
+  API's: an exact path, then the longest prefix, then a method, then the most
+  headers, then the most query params. Ties go to the oldest route, then
+  `namespace/name`, then rule order. So `/api/` beats `/` whichever is
+  listed first.
+- **Backends**: each `backendRef` (kind `Service`, port as the Service's
+  `port`) is a pool of that Service's endpoints:
+  - taken from its EndpointSlices (`kubernetes.io/service-name`), else its
+    Endpoints, else, when neither object exists, its `clusterIP:port`;
+  - the Service port's name picks the endpoints' port;
+  - a headless Service works like any other.
+
+  `weight` (default 1) splits the rule between its refs by smooth weighted
+  round-robin (3:1 is exactly a, a, b, a; a refresh restarts the
+  rotation). Inside a ref, the router uses round-robin, or the endpoint with
+  the fewest requests waiting for a response head when the Service says
+  `storm.io/balance: least-conn`. A cross-namespace ref is followed without
+  a ReferenceGrant (#42).
+- **Health**: an endpoint takes requests while all three hold:
+  - it is ready: EndpointSlice `conditions.ready`, or Endpoints `addresses`
+    as opposed to `notReadyAddresses`;
+  - it passes the Service's active check, if the Service asks for one;
+  - it has not refused a connection in the last 5 s (passive ejection).
+
+  The active check is a `GET` on `storm.io/health-check-path` every
+  `storm.io/health-check-interval` (default `5s`), with
+  `storm.io/health-check-timeout` (default the interval, at most `2s`). It
+  passes on 2xx/3xx. `storm.io/health-check-rise` (default 2) passes in a
+  row bring the endpoint back, and `-fall` (default 3) failures take it out.
+  `-host` sets the Host header, defaulting to the endpoint's address. The
+  check runs over TLS when the route's backend is https. A ref with no such
+  endpoint drops out of the weighting. If its endpoints are only ejected,
+  they are tried anyway rather than answering 503. Endpoint state survives
+  table refreshes.
+- **Retries and timeouts**:
+  - A connection refused or failed moves on to another endpoint, up to 3
+    tries, whatever the request.
+  - A request without a body whose backend closed without answering is also
+    retried, as are the rule's `retry.codes` (`retry.attempts` times,
+    `retry.backoff` apart; Gateway API experimental).
+  - `timeouts.request` bounds the time to the response head, retries
+    included. `timeouts.backendRequest` bounds one attempt. Both answer 504.
+  - Once the head is sent, the body streams with no timeout.
+- **`storm.io/backend: host:port`** on a route overrides its rules: one
+  static backend for every path. This is how a node service routes:
+  `127.0.0.1:9094` is "this node's console" on every node.
+- **Refused, not ignored**: a rule with `filters` (route or backendRef),
+  `sessionPersistence`, or a `RegularExpression` path, header or query match
+  is dropped. The route's status says why (`PartiallyInvalid`, or `Accepted:
+  False` when nothing is left). A bad `storm.io/backend-protocol` drops the
+  route; a bad `storm.io/balance` or check annotation makes that ref
+  unresolved (500).
+- **Status**: after each poll the router merge-patches
+  `.../httproutes/{name}/status`, only when it changed, with its own entry in
+  `status.parents`. That entry has `parentRef` `storm.io/Router stormlb`,
+  `controllerName: storm.io/stormlb`, and these conditions:
+  - `Accepted`;
+  - `PartiallyInvalid` (only when a rule was dropped);
+  - `ResolvedRefs`, False with `BackendNotFound`, `InvalidKind` or
+    `UnsupportedValue`;
+  - `storm.io/BackendsHealthy`, whose message is `ns/svc:port 3/3 healthy;
+    …`.
+
+  Other controllers' entries are kept. A refused write is logged once and
+  retried after 60 s; routing never waits on it. Every node's router writes
+  the same entry, so nodes that disagree on health would take turns. The
+  rustkube apiserver currently answers 404 for HTTPRoute `/status`
+  (rustkube#348), so no status appears there yet. The same table, with
+  every endpoint's state, is `GET /api/v1/routes` on the metrics listener.
+- **Proxying**:
+  - The request goes to the backend as HTTP/1.1, origin-form, with
+    hop-by-hop headers removed (those `Connection` names, `Keep-Alive`, `TE`,
+    `Trailer`, `Transfer-Encoding`, `Upgrade`).
+  - The router sets `X-Forwarded-For` (appended), `X-Forwarded-Host` (if
+    absent) and `X-Forwarded-Proto` (the scheme the client used; a client's
+    own value is replaced). Header names go out Title-Case.
+  - Bodies stream both ways.
+  - An `Upgrade` request (websockets) gets the backend's `101`, and then the
+    two connections are spliced.
+  - Backend connections are kept alive and reused, up to 32 idle per
+    endpoint.
+  - A backend response with `connection: close` closes the client's
+    connection after it.
+  - The request head limit is 16 KiB and 256 headers (beyond that: `431`,
+    then close); a client that sends no head in 30 s is closed.
+- **Its own answers** (text, `connection: close`, naming the host):
+  - `400` with no `Host`;
+  - `404 no route for host <h>`, or `no rule of the routes for host <h>
+    matches <method> <path>`;
+  - `200 router alive` for `GET /healthz` on any host no route claims (a
+    host a route does claim gets `/healthz` proxied);
+  - `500` for an unresolved backendRef, or a rule with no weighted backend;
+  - `503` when no endpoint is healthy;
+  - `502` when no endpoint could be reached or the backend gave no response;
+  - `504` on a timeout.
+- **TLS on either side.**
+  - With `[router.tls]`, a second listener terminates TLS (ALPN `http/1.1`)
+    and feeds the same router. Requests through it carry
+    `X-Forwarded-Proto: https`.
+  - A route marked `storm.io/backend-protocol: https` is dialled over TLS
+    (ALPN `http/1.1`), verified against `backend_ca_file` only (#13). The
+    name checked is each endpoint's IP (an IP SAN), or
+    `storm.io/backend-server-name` if set (also sent as SNI). So an
+    HTTPS-only backend (the apiserver, cadvisor under stormcos#81) can sit
+    behind a route.
+  - Verification fails closed: with no CA loaded, a name the certificate
+    lacks, or another CA's certificate, nothing is sent and the client gets
+    `502` (`stormlb_router_upstream_errors_total{kind="tls"}`).
+  - A client's `Authorization` header is passed through untouched. The
+    router presents no client certificate.
 
 ### VIP API
 
@@ -418,7 +507,7 @@ transport may be IPv4 or IPv6 whatever the VIP's family.
 | `[router] listen`: **80** in the golden | TCP, plain HTTP/1.x, no auth; 308 to https once a `[router.tls]` pair loads (the golden) | clients via `*.storm1.<zone>`; the pod's liveness probe and stormd's `router` API probe on `127.0.0.1:80/healthz` | `[router]` present |
 | `[router.tls] listen`: **443** | TLS 1.2/1.3, then HTTP/1.x | clients via `*.storm1.<zone>` | `[router.tls]` present (the golden: `auto:443`, the router's pair from stormcos#363) |
 | `[vip] port`, e.g. 6443, and each API VIP's `port` | TCP | kube-api clients via the VIP | `[vip]` present, or a VIP made through the API |
-| `[metrics] listen`: **9111** (`auto`: node address and loopback) | plain HTTP, read-only, no token | ironprom on the node; stormcos `check-metrics.sh` | `[metrics]` present |
+| `[metrics] listen`: **9111** (`auto`: node address and loopback) | plain HTTP, read-only, no token: `/metrics`, `/api/v1/routes` (the router's table as JSON), `/healthz` | ironprom on the node; stormcos `check-metrics.sh`; the console | `[metrics]` present |
 | `[api] listen`: **127.0.0.1:9109** by default | plain HTTP, JSON; a bearer token with `token_file` | stormcluster, on the same node | `[api]` present |
 | n/a | IP proto 112 to `224.0.0.18` (IPv6: `ff02::12`); ICMPv6 NA to `ff02::1` on an IPv6 takeover | VRRP peers | `[vrrp] enabled`, or `vrrp` in a VIP |
 | 179 (outbound only) | TCP | BGP peers | `[bgp] enabled` |
@@ -471,9 +560,11 @@ happened are printed.
 
 | Series | Type | Labels | What |
 |---|---|---|---|
-| `stormlb_router_requests_total` | counter | `host`, `code` | Requests: the first of each connection, which is what the router routes. `host` is a route's hostname, or `unrouted` for the router's own answers (a client's Host header never becomes a label). `code` is the backend's status, the router's own (`400`, `404`, `308`, `200` for `/healthz`), or `error` when the backend gave no response. |
-| `stormlb_router_request_duration_seconds` | histogram | `host` | From the request reaching the backend to its first response byte. Buckets 5 ms to 10 s. |
-| `stormlb_router_upstream_errors_total` | counter | `host`, `kind` | `connect` (refused, unreachable), `tls` (an https backend: no CA loaded, verification or handshake failed) or `no_response` (closed before a byte). |
+| `stormlb_router_requests_total` | counter | `host`, `code` | Every request. `host` is the route hostname it matched (a wildcard as written, `*.example.com`), or `unrouted` for a host no route claims (a client's Host header never becomes a label). `code` is the backend's status, or the router's own (`400`, `404`, `308`, `200` for `/healthz`, `500`, `502`, `503`, `504`). |
+| `stormlb_router_backend_requests_total` | counter | `route`, `backend`, `code` | Requests a backend answered: `route` is `namespace/name`, `backend` `namespace/service:port` (or the `storm.io/backend` address). |
+| `stormlb_router_backend_endpoints` | gauge | `route`, `backend`, `state` (`total`, `healthy`) | Each route backend's endpoints, at scrape time. |
+| `stormlb_router_request_duration_seconds` | histogram | `host` | From the request arriving to the backend's response head, retries included. Buckets 5 ms to 10 s. |
+| `stormlb_router_upstream_errors_total` | counter | `host`, `kind` | `connect` (refused, unreachable: the endpoint is ejected and another tried), `tls` (an https backend: no CA loaded, verification or handshake failed), `no_response` (closed before a response head) or `timeout`. |
 | `stormlb_router_connections_total`, `stormlb_router_connections_active` | counter, gauge | `listener` (`http`, `https`) | Connections accepted, and open now. |
 | `stormlb_router_tls_handshake_errors_total` | counter | | Failed or timed-out TLS handshakes. |
 | `stormlb_router_routes` | gauge | | Hostnames in the route table. |
@@ -485,10 +576,6 @@ happened are printed.
 | `stormlb_vip_vrrp_master` | gauge | `vip` | 1 while this node is Master (absent without VRRP). |
 | `process_resident_memory_bytes`, `process_open_fds`, `process_max_fds`, `process_cpu_seconds_total`, `process_start_time_seconds` | gauge, counter | | stormlb's own process, from `/proc/self`. stormd's `:180/metrics` describes stormd, not the process it supervises (stormd#33). |
 | `stormlb_build_info` | gauge | `version` | Always 1. |
-
-**Per connection, not per request:** a keep-alive connection's later
-requests are spliced, not parsed, so they aren't counted. That's the price
-of routing per connection (see [Router](#router)).
 
 stormd's own `/metrics` on `127.0.0.1:180` still reports the process's
 state, restarts and crashes.
@@ -641,7 +728,7 @@ makes the Job.
 | Suite | Budget | What it proves |
 |---|---|---|
 | `short` | < 2 min | `/healthz` answers; stormd (`:180/metrics`) reports stormlb running; an HTTPRoute's hostname reaches its backend, and is a 404 again once deleted. |
-| `medium` | < 30 min | 400 without a Host, the 404 that names the host, `/healthz` on unclaimed and claimed hosts and its CRLF line endings, Host case and port, per-connection routing, a streamed response not held back, an Upgrade as a two-way pipe, an 8 MiB body, the 16 KiB head limit, a dead backend closing with no response, a route update, a backendRef through a Service (skip without a Service data plane), a headless Service's route skipped, 50 hosts under concurrent load, deleted routes back to 404, no restart or crash under stormd. The VIP half is reported skip: it is not shipped. |
+| `medium` | < 30 min | 400 without a Host, the 404 that names the host, `/healthz` on unclaimed and claimed hosts and its CRLF line endings, Host case and port, per-request routing on one connection, a streamed response not held back, an Upgrade as a two-way pipe, an 8 MiB body, the 16 KiB head limit (431), a dead backend's 502, a route update, a backendRef to its Service's endpoints, a headless Service with no endpoints a 503, rules by longest prefix with a 3:1 weight split, the route's status conditions, failover past an endpoint that refuses connections, 50 hosts under concurrent load, deleted routes back to 404, no restart or crash under stormd. The VIP half is reported skip: it is not shipped. |
 | `long` | the night window | Waves sized from the node's allocatable CPU (read from the API) and the container's open-file limit. Each wave creates routes, holds connections at that size, drains, and checks residue. Each `wave-<n>` line carries route-programming time, request p50/p99, requests/s, drain time, leftovers, restarts and idle latency. `trend` fails on the first wave that is slower than the first wave of its size. |
 
 - **Backends** are listeners in the test pod. They are reached on the node's
@@ -686,8 +773,19 @@ What the code does not do yet, which older docs implied it did:
   runs on nodes.
 - The API is plain HTTP on loopback, with an optional bearer token: no TLS
   (stormcos#81 allows nothing else off-node, which is why it is loopback).
-- Metrics count the first request of each keep-alive connection only (the
-  router splices after the first head).
+- [#42](https://github.com/glennswest/stormlb/issues/42): a cross-namespace
+  backendRef is followed without a ReferenceGrant.
+- [rustkube#347](https://github.com/glennswest/rustkube/issues/347): rustkube
+  writes every Running pod as ready in its EndpointSlices and Endpoints, and a
+  named `targetPort` as the Service port. Until it is fixed, readiness does not
+  take an endpoint out of rotation there; an active check
+  (`storm.io/health-check-path`) and passive ejection do.
+- [rustkube#348](https://github.com/glennswest/rustkube/issues/348): rustkube
+  answers 404 for HTTPRoute `/status`, so the router's status is not seen
+  there (routing is unaffected).
+- LoadBalancer Services (an address per Service, `status.loadBalancer`,
+  announcement, `externalTrafficPolicy: Local`) are flowsdn's, not stormlb's
+  (owner, stormlb#37): flowsdn#475.
 - [stormcert#69](https://github.com/glennswest/stormcert/issues/69):
   stormcert can't renew the router's wildcard pair (it re-issues it on
   every pass), so stormcos's renew check skips `router.crt` until then.

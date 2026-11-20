@@ -3,6 +3,36 @@
 ## [Unreleased]
 
 ### 2026-11-19
+- **feat:** the router takes its backend config from HTTPRoutes (#37), and
+  routes **every request** on its own (#26). It is now an HTTP/1.1 proxy
+  (hyper) instead of a splice after the first head.
+  - Hostnames: exact, then wildcard.
+  - Matches: path Exact/PathPrefix, method, and headers/query Exact, with
+    the Gateway API's precedence.
+  - Weighted backendRefs, each a pool of the Service's endpoints
+    (EndpointSlices, else Endpoints, else the clusterIP), round-robin or
+    `storm.io/balance: least-conn`. Headless Services work.
+  - Health: readiness, an optional active check per Service
+    (`storm.io/health-check-path/-interval/-timeout/-rise/-fall/-host`), and
+    passive ejection (5 s after a refused connection). Connections that fail
+    move on to another endpoint (3 tries).
+  - Rule `timeouts` (504) and `retry` (codes, for bodyless requests).
+  - HTTPRoute `status.parents`: Accepted, PartiallyInvalid, ResolvedRefs and
+    `storm.io/BackendsHealthy`, written on change.
+  - Per-backend metrics (`stormlb_router_backend_requests_total`,
+    `stormlb_router_backend_endpoints`) and `GET /api/v1/routes` on the
+    metrics listener.
+  - Hop-by-hop headers are stripped; X-Forwarded-For/-Host/-Proto are set.
+  - Backend connections are kept alive.
+  - Changed answers: a dead or unverifiable backend is now a 502 (it was a
+    close with no response), no healthy endpoint is a 503, an unresolved ref
+    is a 500, and a head past 16 KiB gets a 431 before the close.
+  - LoadBalancer Services are flowsdn's (owner; flowsdn#475).
+  - Filed rustkube#347 (EndpointSlice readiness, named targetPort) and
+    rustkube#348 (HTTPRoute /status 404), and the gap #42 (ReferenceGrant).
+- **build:** hyper (server, client, http1), hyper-util, http,
+  http-body-util and bytes as direct dependencies. All were already locked
+  through reqwest; hyper's server feature adds httpdate.
 - **chore:** #32 applied: the registry now declares the `router`, `vips`
   and `metrics` APIs (`component export` shows them). The image carries them
   as stormd `[[process.api]]` probes.

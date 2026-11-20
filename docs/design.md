@@ -131,31 +131,64 @@ domains and no single place to debug.
 
 Choices that follow from the code (`src/router.rs`):
 
-- **Per connection, not per request.** It reads one head, picks a backend and
-  splices. Keep-alive, websockets and SSE come free. The cost: a connection
-  whose later request names another host stays on the first backend.
-  Browsers don't reuse a connection across distinct hostnames.
+- **Per request (#26, #37).** The router is an HTTP/1.1 proxy (hyper on
+  both sides), not a splice after the first head. The storefront
+  (stormstorefront#1) routes `/` to web and `/api/` to api on one hostname,
+  and a browser sends both on one keep-alive connection, so the backend has
+  to be picked per request. Upgrades (websockets) are still a splice, after
+  the backend's 101. Bodies stream, and backend connections are kept alive
+  and reused.
+- **The rules are the backend config (#37).** Hostnames (exact, then
+  wildcard), matches (path Exact/PathPrefix, method, headers and query
+  Exact) with the Gateway API's precedence, weighted backendRefs, timeouts
+  and retries. Each backendRef is a pool of the Service's endpoints, from
+  EndpointSlices (else Endpoints, else the clusterIP), dialled directly. A
+  ClusterIP in between would hide the pods' health from the router and
+  spread the requests a second time. What a rule asks for and the router
+  cannot do (filters, RegularExpression matches, session persistence) is
+  dropped and said in the route's status, not silently ignored.
+- **Health is three things.** Readiness from the endpoint objects; an
+  optional active check per Service (`storm.io/health-check-*`, with
+  rise/fall); and passive ejection, where a refused connection takes the
+  endpoint out for 5 s and the request moves on to another endpoint. The
+  passive part is what makes "kill a pod, lose no request" hold between
+  polls. It also covers an apiserver whose readiness is coarse (rustkube#347
+  marks every Running pod ready).
 - **Polled, not watched.** A route change is an operator action, so 5 s of
   staleness is invisible. A poll also can't be wedged by a watch
   implementation bug in a reimplemented apiserver. The last good table
-  survives apiserver errors.
-- **`storm.io/backend` before backendRefs.** A node service is
+  survives apiserver errors. A poll is four cluster-wide lists (routes,
+  Services, EndpointSlices, Endpoints), not one request per route.
+  Endpoint state (health, ejection, in-flight count) is kept across
+  refreshes.
+- **Status is written, not just logged.** Each poll merge-patches the
+  route's `status.parents` with its own entry (`storm.io/stormlb`):
+  Accepted, ResolvedRefs, and `storm.io/BackendsHealthy` with each
+  backend's healthy/total. It writes only on change, keeps other
+  controllers' entries, and routing never waits on it. Routes here name no
+  Gateway, so the parent is the router itself (`storm.io/Router stormlb`).
+- **LoadBalancer Services are not here.** The owner put them on flowsdn
+  (stormlb#37, "you need a flowsdn solution"; flowsdn#475): the address,
+  `status.loadBalancer`, the announcement and `externalTrafficPolicy: Local`
+  belong to the CNI's datapath. The router is the L7 half behind it.
+- **`storm.io/backend` before rules.** A node service is
   `127.0.0.1:<port>` on every node, so cluster manifests carry no node
   addresses.
 - **`auto` listen.** It binds the node's routable address and loopback, not
   the wildcard, because stormimds holds `169.254.169.254:80`.
 
-Deliberately not done (yet): wildcard hostnames, path and header matching,
-more than the first rule and backendRef, and a 502 for a dead backend.
+Deliberately not done (yet): ReferenceGrants for cross-namespace refs
+(#42), HTTPRoute filters (header modifiers, redirects, rewrites, mirrors),
+RegularExpression matches, session persistence, and HTTP/2.
 
-**Metrics follow the routing (#12).** The router routes per connection and
-splices after the first head, so it counts the first request of each
-connection. It reads the backend's first bytes on the way, for the status
-and the time to first byte, while the client→backend half keeps copying, so
-an upload is never held behind a response that waits for it. The `host`
-label is a route's hostname or `unrouted`, never the client's Host header,
-so a scanner can't grow the series set. Metrics have their own port
-(`:9111`), because `/metrics` on `:80` is a routable path.
+**Metrics follow the requests (#12, #37).** Every request is counted by
+the hostname it matched and its code, with the time to the response head.
+Each route backend gets its own request counter and a healthy/total gauge,
+read at scrape time. The `host` label is a route's hostname or `unrouted`,
+never the client's Host header, so a scanner can't grow the series set.
+Metrics have their own port (`:9111`), because `/metrics` on `:80` is a
+routable path. The same listener serves `/api/v1/routes`, the table with
+every endpoint's state, for the console.
 
 TLS is now a requirement, not an option: stormcos#81 has every node listener
 serve TLS with a stormcert certificate and authenticate. The router
@@ -174,10 +207,9 @@ because the health probe is the one exemption #81 allows.
 about that backend, not about the router. The router trusts only
 `backend_ca_file` (the cluster CA), never public roots, so a route can't
 be pointed at something that merely has a valid web certificate. It
-verifies the IP the route names, or a name the route gives. Every failure
-closes the client's connection without sending anything: a request
-carrying a bearer token must never reach a backend the router couldn't
-verify.
+verifies each endpoint's IP, or a name the route gives. Every failure is the
+router's 502 with nothing sent on: a request carrying a bearer token must
+never reach a backend the router couldn't verify.
 
 **Its own identity (#9, #10).** The owner chose a ServiceAccount of
 stormlb's own, with only what it reads (stormcos#203): stormcos mints the

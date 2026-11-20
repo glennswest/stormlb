@@ -63,8 +63,12 @@ router_id = "192.168.8.51"   # BGP identifier; the IPv4 VIP's next-hop
 # [metrics]
 # listen = "auto:9111"                   # node address + loopback
 
-# The L7 Host-header router over HTTPRoutes. Present = enabled; alone, it is a
-# complete config (no [vip] needed).
+# The L7 router over HTTPRoutes: each request matched on host, path, method,
+# headers and query; weighted backendRefs to the Services' endpoints, with
+# health checks and failover (README "Router"). Its table is at
+# :9111/api/v1/routes. Present = enabled; alone, it is a complete config (no
+# [vip] needed). The backend config itself lives on the HTTPRoutes and
+# Services (storm.io/balance, storm.io/health-check-*), not here.
 # [router]
 # listen = "auto:80"                     # node address + 127.0.0.1; default "0.0.0.0:80"
 # apiserver = "https://127.0.0.1:6443"

@@ -18,7 +18,7 @@ docs/design.md, as of the commit this file was last changed in.
 
 One static Rust binary, two independent halves:
 
-- **Router** (`[router]`): an L7 Host-header demux over Gateway API HTTPRoutes. *Ships today.*
+- **Router** (`[router]`): an L7 HTTP/1.1 proxy over Gateway API HTTPRoutes, routing each request by its rules. *Ships today.*
 - **VIP half** (`[vip]`, `[api]`): a health-checked L4 proxy for the kube-api VIP, presented by VRRP (L2) or BGP anycast (L3). VIPs can be made and changed at runtime through an HTTP API, for stormcluster (#16).
 
 ---
@@ -78,13 +78,12 @@ Router only if there is no `[vip]`. Otherwise the L4 balancer runs in the foregr
 
 ## What works today: the router (shipped)
 
-- **One head, then a wire.** Keep-alive, chunked bodies, websockets and SSE pass through untouched. Routing is per connection.
-- **Route table:** every `spec.hostnames` entry maps to one backend:
-  1. the `storm.io/backend` annotation, `host:port` verbatim (`127.0.0.1:9094` = "this node's console" on every node)
-  2. otherwise the first `backendRef`, resolved to the Service's `clusterIP:port`
+- **Per request (#26, #37):** an HTTP/1.1 proxy; each request is matched on host (exact, then wildcard), path (Exact/PathPrefix), method, headers and query, with the Gateway API's precedence. Bodies stream; websockets are spliced after the 101.
+- **Backend config from the route (#37):** weighted `backendRefs`, each a pool of the Service's endpoints (EndpointSlices, else Endpoints), round-robin or least-conn; readiness, an optional active check (`storm.io/health-check-*`) and passive ejection; failover to another endpoint; `timeouts` and `retry`. `storm.io/backend` = one static backend (node services).
+- **Status on the object:** Accepted, ResolvedRefs, `storm.io/BackendsHealthy` in `status.parents`; the table with every endpoint at `:9111/api/v1/routes`.
 - **Survives the apiserver:** a failed poll keeps the last good table.
 - **Its identity:** `token_file` (its ServiceAccount's bearer token, re-read each poll) and `ca_file` (the apiserver verified against the cluster CA) (#9, #10). The golden sets `ca_file` (#21); `token_file` waits on stormcos minting the token (#33, stormcos#76), so it still reads anonymously, on sno and bastion.
-- **Its own answers:** `400` with no Host, `404 no route for host <h>`, `200 router alive` for `/healthz` on an unclaimed host.
+- **Its own answers:** `400` with no Host, `404` naming the host, `200 router alive` for `/healthz` on an unclaimed host, `503` no healthy endpoint, `502` unreachable, `504` timeout.
 - **`listen = "auto:80"`** binds the node's routable IPv4 plus loopback, not `0.0.0.0`, because stormimds holds `169.254.169.254:80`.
 
 ---
@@ -111,7 +110,8 @@ Unit-tested; `tests/balancer.rs` drives round-robin and failover through the rea
 | Running the test container on test machines | runner shipped (`stormcentral test run`); `test/requires.toml` declares `host_network` (all suites) and the `nodes` read (`long`), `test/build.sh` builds the binary: **ready, not yet run on a test machine** |
 | VRRP over IPv6 (ff02::12, link-local source, unsolicited NA) | **done** (#39) |
 | 4-octet ASNs, MP-BGP IPv6 | **done** (#40) |
-| Wildcard hosts, path/header matches, 502 on a dead backend | not done (router) |
+| Rules, weights, live endpoints, health, status (#37) | **done**; LoadBalancer Services are flowsdn's (flowsdn#475) |
+| ReferenceGrant for cross-namespace refs; filters, regex matches | not done (#42) |
 | Sub-second VRRP failover (config takes whole seconds) | not possible today |
 
 ---
@@ -153,7 +153,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 | 180 | **stormd's** API in the golden, not stormlb's; plain, no auth (stormd#32) |
 
 - **Health:** `/healthz` for the pod's liveness; stormd probes three APIs (#32), `router` (:80), `vips` (:9109) and `metrics` (:9111): healthy, slow, stalled or down.
-- **Metrics:** `:9111/metrics` (#12): router requests by host and code, time to first byte, upstream errors, connections, route and certificate reloads, VIP connections and backend health, and the process's own memory, fds and CPU. stormd's `:180` still reports state and restarts.
+- **Metrics:** `:9111/metrics` (#12): router requests by host and code, per-backend requests and endpoints, time to the response head, upstream errors, connections, route and certificate reloads, VIP connections and backend health, and the process's own memory, fds and CPU. stormd's `:180` still reports state and restarts.
 
 ---
 
