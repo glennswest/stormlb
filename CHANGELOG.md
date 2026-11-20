@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 2026-11-19
+- **chore:** #32 applied: the registry now declares the `router`, `vips`
+  and `metrics` APIs (`component export` shows them). The image carries them
+  as stormd `[[process.api]]` probes.
+
 ### 2026-11-18
 - **feat:** BGP 4-octet ASNs and MP-BGP IPv6 (#40). The OPEN now offers
   the 4-octet AS (RFC 6793) and Multiprotocol (RFC 4760, the VIP's AFI,

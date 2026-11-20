@@ -397,7 +397,7 @@ deliberate commit of its own.
         with proof `get:http://{node}:9111/metrics ~ stormlb_build_info`
         (holds only once the master applies the registry edit: until then
         the registry config still says metrics auto:9104).
-- [ ] #32 (P0) API health declarations (stormcentral#596, stormd#49).
+- [x] #32 (P0) API health declarations (stormcentral#596, stormd#49).
       Registry `apis` (stormd probes, `[[process.api]]` in the golden):
       `router` /healthz on :80 (accept, head parse, route-table lock; 20/250
       ms, 5 s), `vips` http://127.0.0.1:9109/api/v1/vips (50/500 ms, 10 s),
@@ -409,10 +409,9 @@ deliberate commit of its own.
   - [x] README (ports/health, how it ships), deck, CHANGELOG.
   - [x] sc-build passed at 5df3341 (release, 43 unit + every integration,
         cargo doc -D warnings). Commented on #32.
-  - [ ] 2026-11-13: export lacks apis; parked with `wait-owner --action`
-        (the `--set apis=…` command). On Done: re-check export, then
-        `component build stormlb --url http://stormcentral.g8.lo`, close #32
-        (or `shipped` with proof `log:.*router.*healthy` if one fits).
+  - [x] 2026-11-13: export lacked apis; parked with `wait-owner --action`.
+        2026-11-19: the master ran the `--set apis=…`; `component export`
+        shows router/vips/metrics as declared. Image requested, #32 closed.
 - [x] Docs refresh (2026-11-14, since 2026-11-07). Code changed only in
       e8dee08 (ports, already documented). Fixed: VIP port 7443 / stormcluster
       is the client (#28 text), gap #34 (stormfn 9109) listed. #28 can close
