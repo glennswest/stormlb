@@ -82,7 +82,7 @@ Router only if there is no `[vip]`. Otherwise the L4 balancer runs in the foregr
 - **Backend config from the route (#37):** weighted `backendRefs`, each a pool of the Service's endpoints (EndpointSlices, else Endpoints), round-robin or least-conn; readiness, an optional active check (`storm.io/health-check-*`) and passive ejection; failover to another endpoint; `timeouts` and `retry`. `storm.io/backend` = one static backend (node services).
 - **Status on the object:** Accepted, ResolvedRefs, `storm.io/BackendsHealthy` in `status.parents`; the table with every endpoint at `:9111/api/v1/routes`.
 - **Survives the apiserver:** a failed poll keeps the last good table.
-- **Its identity:** `token_file` (its ServiceAccount's bearer token, re-read each poll) and `ca_file` (the apiserver verified against the cluster CA) (#9, #10). The golden sets `ca_file` (#21); `token_file` waits on stormcos minting the token (#33, stormcos#76), so it still reads anonymously, on sno and bastion.
+- **Its identity:** `token_file` (its ServiceAccount's bearer token, re-read each poll) and `ca_file` (the apiserver verified against the cluster CA) (#9, #10). The golden sets `ca_file` (#21); `token_file` waits on stormcos minting the token (#33, stormcos#395), so it still reads anonymously, on sno and bastion.
 - **Its own answers:** `400` with no Host, `404` naming the host, `200 router alive` for `/healthz` on an unclaimed host, `503` no healthy endpoint, `502` unreachable, `504` timeout.
 - **`listen = "auto:80"`** binds the node's routable IPv4 plus loopback, not `0.0.0.0`, because stormimds holds `169.254.169.254:80`.
 
@@ -176,7 +176,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 
 **Open issues that matter**
 
-- #33: the golden's router reads anonymously until stormcos mints its token (stormcos#76)
+- #33: the golden's router reads anonymously until stormcos mints its token (stormcos#395)
 - stormcert#69: the router's wildcard pair isn't renewed yet
 
 ---

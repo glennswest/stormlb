@@ -75,7 +75,7 @@ TOML. Unknown keys are ignored. A fuller example is in
 | `apiserver` | `"https://127.0.0.1:6443"` | Where HTTPRoutes, Services, Endpoints, EndpointSlices and ReferenceGrants are read from, and route status is written. |
 | `poll_secs` | `5` (min 1) | Seconds between route-table refreshes. |
 | `backend_ca_file` | none | The CA (PEM) a route's backend must chain to when the route says `storm.io/backend-protocol: https`; on a node, the cluster CA `/data/stormcert/ca.crt`. Only these certificates are trusted, not the public roots. Re-read on the route poll when it changes, so it may appear after the router starts. Unset or not loadable: https backends' connections fail closed. |
-| `token_file` | none | The router's identity (#9): a file holding a bearer token, its ServiceAccount's, which stormcos mints (stormcos#76 step 2) with list on HTTPRoutes, Services, Endpoints, EndpointSlices and ReferenceGrants and patch on `httproutes/status` (#37). It's sent as `Authorization: Bearer` and re-read on every poll, so it can be rotated in place. Set but missing or empty: no refresh is made, and the last table keeps serving. Unset: anonymous, as before. |
+| `token_file` | none | The router's identity (#9): a file holding a bearer token, its ServiceAccount's, which stormcos mints (stormcos#395, step 2 of stormcos#76) with list on HTTPRoutes, Services, Endpoints, EndpointSlices and ReferenceGrants and patch on `httproutes/status` (#37). It's sent as `Authorization: Bearer` and re-read on every poll, so it can be rotated in place. Set but missing or empty: no refresh is made, and the last table keeps serving. Unset: anonymous, as before. |
 | `ca_file` | none | The CA (PEM) the apiserver's certificate must chain to, on a node `/data/stormcert/ca.crt` (#10). Only it is trusted, not public roots. Re-read when it changes, so it may appear after the router starts. When set, `insecure` is ignored. |
 | `insecure` | `true` | Without `ca_file`: accept the apiserver's certificate unverified. `false` without `ca_file` trusts only the public roots compiled in, which refuses stormcert's certificate. |
 
@@ -201,7 +201,7 @@ that the rule's weights pick.
     `--dev-anonymous-admin`.
   - With `ca_file` the apiserver is verified against the cluster CA (#10).
     The golden sets `ca_file` (`/data/stormcert/ca.crt`, #21) but no
-    `token_file` yet: the token is stormcos's (stormcos#76; stormlb#33), so
+    `token_file` yet: the token is stormcos's (stormcos#395, step 2 of stormcos#76; stormlb#33), so
     the shipped router still reads anonymously.
 - **Hostnames**: exact names first, then wildcards (`*.example.com` covers
   `a.example.com` and `a.b.example.com`, not `example.com`). Among wildcards
@@ -779,7 +779,7 @@ What the code does not do yet, which older docs implied it did:
 
 - [#33](https://github.com/glennswest/stormlb/issues/33): the golden's
   config doesn't set `token_file` yet. It needs stormlb's ServiceAccount
-  token (stormcos#76 step 2), so the shipped router still reads
+  token (stormcos#395, which stormcos has not minted as of 2026-11-20), so the shipped router still reads
   anonymously, against sno and bastion only.
 - [#34](https://github.com/glennswest/stormlb/issues/34): the API's default
   `127.0.0.1:9109` is stormfn's default port; the clash comes once stormfn

@@ -532,3 +532,12 @@ deliberate commit of its own.
   - Done in 07e6248. sc-build passed there on a build VM: release build,
     68 unit + every integration test, clippy and cargo doc -D warnings,
     test crate 12 unit + 3 harness (medium 26). #42 closed, image requested.
+- [ ] #33 (P2) shipped config sets `[router] token_file`. Blocked
+      (2026-11-20): stormcos mints 24 service tokens in build-goldens.sh,
+      not stormlb's; its issue is stormcos#395 (open). Posted the current
+      RBAC there (list httproutes, referencegrants, services, endpoints,
+      endpointslices; patch httproutes/status; SA probably storm-lb/stormlb
+      since stormcos#1020). Docs cite #395. Proposed --after stormcos#395.
+      Then: `stormcentral note` the master the registry edit (`token_file =
+      "/data/stormcert/stormlb.token"` or wherever #395 puts it), image,
+      check on a node with anonymous admin off, close.

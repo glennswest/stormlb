@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-11-20
+- **docs:** #33 (the router's `token_file`) waits on stormcos#395, which
+  mints stormlb's ServiceAccount token; README and deck cite it. The
+  router's RBAC was out of date there, so stormcos#395 now has the current
+  list: list on httproutes, referencegrants, services, endpoints and
+  endpointslices, and patch on httproutes/status.
 - **fix:** the router follows a cross-namespace HTTPRoute backendRef only
   when the target namespace holds a ReferenceGrant from HTTPRoute in the
   route's namespace to that Service (or every Service) (#42). Otherwise
