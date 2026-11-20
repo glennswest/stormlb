@@ -243,7 +243,7 @@ async fn medium_passes_but_for_the_known_gaps() {
     let mut r = Report::new();
     stormlb_test::run(&env, &mut r).await;
     expect(&r, &[("stormd-no-restarts", "skip"), ("vip-half", "skip")]);
-    assert_eq!(r.outcomes.len(), 22);
+    assert_eq!(r.outcomes.len(), 25);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

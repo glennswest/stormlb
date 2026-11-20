@@ -22,7 +22,7 @@ pub async fn run(env: &Env, r: &mut Report) {
     };
     let host = env.host("short");
     let routed = r.run("route-by-host", async {
-        let route = api.route("short", &[host.clone()], Some(a.addr.as_str()), None);
+        let route = api.route("short", std::slice::from_ref(&host), Some(a.addr.as_str()), None);
         if let Err(e) = api.create(&api.routes(), &route).await {
             return Outcome::Infra(format!("cannot create the HTTPRoute: {e}"));
         }

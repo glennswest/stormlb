@@ -859,8 +859,11 @@ where
 /// in all, each for [`IDLE_FOR`]: past that the connection is closed.
 #[derive(Default)]
 struct Pool {
-    idle: std::sync::Mutex<HashMap<String, Vec<(Instant, client_http1::SendRequest<Body>)>>>,
+    idle: std::sync::Mutex<HashMap<String, Vec<Idle>>>,
 }
+
+/// An idle backend connection, and when it went idle.
+type Idle = (Instant, client_http1::SendRequest<Body>);
 
 impl Pool {
     fn take(&self, key: &str) -> Option<client_http1::SendRequest<Body>> {
