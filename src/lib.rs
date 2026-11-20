@@ -14,7 +14,8 @@
 //! - [`bgp`]      — BGP-anycast advertisement of the VIP (L3, active-active).
 //! - [`vips`]     — named VIPs (listener, pool, health, VRRP), changed at runtime.
 //! - [`api`]      — the HTTP API stormcluster uses to set a VIP's backends.
-//! - [`router`]   — the L7 Host-header router over Gateway API HTTPRoutes.
+//! - [`router`]   — the L7 router (HTTP/1.1 proxy) over Gateway API HTTPRoutes.
+//! - [`routes`]   — its backend config: rules, weighted backends, endpoints, health, status.
 //! - [`tls`]      — the router's TLS termination: certificates by SNI, reloaded.
 //! - [`metrics`]  — Prometheus `/metrics` for the router and the VIPs.
 //! - [`config`]   — the TOML config; `[vip]`, `[router]` and `[api]` are each optional.
@@ -29,6 +30,7 @@ pub mod health;
 pub mod metrics;
 pub mod pool;
 pub mod router;
+pub mod routes;
 pub mod tls;
 pub mod vip;
 pub mod vips;

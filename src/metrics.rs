@@ -43,9 +43,11 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ("stormlb_build_info", "gauge", "Always 1; the version is the label."),
     ("stormlb_router_connections_total", "counter", "Connections accepted by the router, by listener (http, https)."),
     ("stormlb_router_connections_active", "gauge", "Router connections open now, by listener."),
-    ("stormlb_router_requests_total", "counter", "Requests by route host (or unrouted) and status code: the first request of each connection, which is what the router routes. code=error: the backend gave no response."),
-    ("stormlb_router_request_duration_seconds", "histogram", "From the request being sent to the backend to its first response byte, by route host."),
-    ("stormlb_router_upstream_errors_total", "counter", "Backend failures by route host and kind (connect, no_response)."),
+    ("stormlb_router_requests_total", "counter", "Requests by route hostname (or unrouted) and status code: every request, the backend's code or the router's own (400, 404, 308, 500, 502, 503, 504)."),
+    ("stormlb_router_request_duration_seconds", "histogram", "From the request arriving to the backend's response head, retries included, by route hostname."),
+    ("stormlb_router_upstream_errors_total", "counter", "Backend failures by route hostname and kind (connect, tls, no_response, timeout); a connect failure is retried on another endpoint."),
+    ("stormlb_router_backend_requests_total", "counter", "Requests a backend answered, by route (namespace/name), backend (namespace/service:port or address) and status code."),
+    ("stormlb_router_backend_endpoints", "gauge", "A route backend's endpoints, by state: total, healthy (ready, passing its check, not ejected)."),
     ("stormlb_router_tls_handshake_errors_total", "counter", "TLS handshakes that failed or timed out."),
     ("stormlb_router_routes", "gauge", "Hostnames in the route table."),
     ("stormlb_router_route_refreshes_total", "counter", "Route-table refreshes from the apiserver, by result (ok, error)."),
@@ -218,11 +220,27 @@ impl Drop for ActiveGuard {
     }
 }
 
-/// The series computed at scrape time: build info, and each VIP's backend
-/// health and VRRP state.
+/// The series computed at scrape time: build info, each VIP's backend
+/// health and VRRP state, and each route backend's endpoints.
 pub fn scrape_series(reg: Option<&Registry>) -> Vec<(&'static str, String, f64)> {
     let mut out = vec![("stormlb_build_info", labels(&[("version", env!("CARGO_PKG_VERSION"))]), 1.0)];
     out.extend(process_series());
+    if let Some(t) = crate::router::current() {
+        // One series per (route, backend), however many rules name it.
+        let mut seen = std::collections::BTreeSet::new();
+        for r in &t.routes {
+            let route = format!("{}/{}", r.namespace, r.name);
+            for b in r.rules.iter().flat_map(|rl| rl.backends.iter()) {
+                if !seen.insert((route.clone(), b.name.clone())) {
+                    continue;
+                }
+                let total = b.endpoints.as_ref().map(|e| e.len()).unwrap_or(0);
+                for (state, n) in [("total", total), ("healthy", b.healthy_count())] {
+                    out.push(("stormlb_router_backend_endpoints", labels(&[("route", &route), ("backend", &b.name), ("state", state)]), n as f64));
+                }
+            }
+        }
+    }
     for v in reg.map(|r| r.list()).unwrap_or_default() {
         for b in &v.status.backends {
             let be = format!("{}:{}", b.address, b.port);
@@ -273,7 +291,9 @@ pub fn process_series() -> Vec<(&'static str, String, f64)> {
     out
 }
 
-/// Serve `/metrics` (and `/healthz`) on `cfg.listen` forever.
+/// Serve `/metrics`, `/api/v1/routes` (the router's table: every route's
+/// rules, backends and each endpoint's health, as JSON) and `/healthz` on
+/// `cfg.listen` forever.
 pub async fn run(cfg: MetricsCfg, reg: Option<Arc<Registry>>) -> anyhow::Result<()> {
     let ls = crate::router::bind_listeners(&cfg.listen).await?;
     for l in &ls {
@@ -326,7 +346,11 @@ pub async fn serve(l: TcpListener, reg: Option<Arc<Registry>>) {
                     ("200 OK", "text/plain; version=0.0.4; charset=utf-8", global().render(&scrape_series(reg.as_deref())))
                 }
                 ("GET", "/healthz") => ("200 OK", "text/plain", "ok\n".to_string()),
-                ("GET", _) => ("404 Not Found", "text/plain", "metrics are at /metrics\n".to_string()),
+                ("GET", "/api/v1/routes") => match crate::router::current() {
+                    Some(t) => ("200 OK", "application/json", t.view().to_string() + "\n"),
+                    None => ("404 Not Found", "text/plain", "no router runs in this stormlb\n".to_string()),
+                },
+                ("GET", _) => ("404 Not Found", "text/plain", "metrics are at /metrics, the router's routes at /api/v1/routes\n".to_string()),
                 _ => ("405 Method Not Allowed", "text/plain", "GET only\n".to_string()),
             };
             let resp = format!("HTTP/1.1 {status}\r\ncontent-type: {ctype}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());

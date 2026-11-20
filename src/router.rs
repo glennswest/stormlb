@@ -1,4 +1,4 @@
-//! The L7 half of inbound: a Host-header router over Gateway API HTTPRoutes.
+//! The L7 half of inbound: a router over Gateway API HTTPRoutes.
 //!
 //! docs/routing.md (stormpump) names the shape: wildcard DNS carries
 //! `*.storm1.<zone>` to a VIP, and something at the VIP demuxes on the HTTP
@@ -7,53 +7,71 @@
 //! and one component owning one request path is the debugging story the
 //! alternative (VIP ours, L7 Cilium/Envoy) does not have.
 //!
-//! **Per-connection, not per-request.** The router reads exactly one request
-//! head, picks the backend from the Host header, replays the head and then
-//! splices bytes both ways. That single decision buys HTTP/1.1 keep-alive,
-//! chunked bodies, websockets and SSE for free, because after the head the
-//! router is a wire. What it costs: a keep-alive connection whose second
-//! request names a different Host stays on the first backend. Browsers do not
-//! do that to distinct names, and every backend here answers one name.
+//! **Per request** (#26, #37). The router is an HTTP/1.1 proxy (hyper on
+//! both sides): every request on a keep-alive connection is matched on its
+//! own — host, path, method, headers, query — against the routes' rules
+//! ([`crate::routes`]), and sent to an endpoint of the backend the rule's
+//! weights pick. Bodies stream both ways; `Upgrade` (websockets) is answered
+//! by the backend's 101 and then the two connections are spliced. Backend
+//! connections are kept alive and reused. Hop-by-hop headers are not
+//! forwarded; `X-Forwarded-For`, `-Host` and `-Proto` are set (a client's own
+//! `X-Forwarded-Proto` is replaced). A backend that answers `connection:
+//! close` closes the client's connection after that response too.
+//!
+//! **Errors are answers**: no rule for the host 404s, a rule whose backends
+//! have no healthy endpoint 503s, an unresolved backendRef 500s, a backend
+//! that cannot be reached (after trying up to three endpoints) or gives no
+//! response 502s, and `timeouts.request` 504s. Each body names the host.
 //!
 //! **The table is polled, not watched.** A route change is an operator
-//! action; five seconds of staleness is invisible, and a poll cannot be
+//! action; a few seconds of staleness is invisible, and a poll cannot be
 //! wedged by a watch protocol misunderstanding — this apiserver is a
 //! reimplementation, and the router should not be the corner that finds its
 //! watch bugs. The poll keeps serving the last good table on error, because
-//! a flapping apiserver must not take working routes down with it.
+//! a flapping apiserver must not take working routes down with it. Between
+//! polls, health moves on its own: active checks, and a refused connection
+//! ejecting an endpoint for [`crate::routes::EJECT`].
+//!
+//! **Status**: each poll writes what it understood into the route's
+//! `status.parents` (Accepted, ResolvedRefs, storm.io/BackendsHealthy), only
+//! when that changed. A refused write is logged once; routing never waits on
+//! it.
 //!
 //! **TLS** (`[router.tls]`, #14): a second listener terminates TLS with the
 //! configured certificates (picked by SNI, [`crate::tls`]) and feeds the same
-//! demux, adding `X-Forwarded-Proto: https`. Once a certificate is loaded,
-//! plain HTTP answers with a 308 to https, except `/healthz`. The upstream
-//! connection is plain either way (TLS to backends is #13).
+//! router. Once a certificate is loaded, plain HTTP answers with a 308 to
+//! https, except `/healthz`.
 //!
 //! **TLS to backends** (#13): a route with `storm.io/backend-protocol: https`
 //! is dialled over TLS and verified against `[router] backend_ca_file` only,
-//! for the backend's IP (or `storm.io/backend-server-name`). Without a CA the
-//! connection fails closed; nothing is sent to a backend it can't verify.
-//!
-//! Backends resolve two ways, in order:
-//! - the `storm.io/backend` annotation, `host:port` verbatim. This is how a
-//!   *node* service routes — `127.0.0.1:9094` means "this node's console"
-//!   on every node, which keeps per-node addresses out of cluster manifests.
-//! - the first rule's first backendRef, resolved to the Service's
-//!   clusterIP:port. Cilium's kube-proxy replacement makes a ClusterIP
-//!   reachable from the node, which is where this router stands.
+//! for the endpoint's IP (or `storm.io/backend-server-name`). Without a CA
+//! the request fails closed (502); nothing is sent to a backend it can't
+//! verify.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::convert::Infallible;
+use std::net::SocketAddr;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+use http::header::{self, HeaderMap, HeaderName, HeaderValue};
+use http::{Request, Response, Uri};
+use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Empty, Full};
+use hyper::body::{Body as _, Incoming};
+use hyper::client::conn::http1 as client_http1;
+use hyper::server::conn::http1 as server_http1;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::{info, warn};
 
 use crate::metrics::global as metrics;
+use crate::routes::{self, Endpoint, Known, Lookup, NewCheck, Proto, ReqView, Rule, Table};
 use crate::tls::{self, TlsCfg};
+
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RouterCfg {
@@ -76,8 +94,9 @@ pub struct RouterCfg {
     #[serde(default)]
     pub ca_file: Option<String>,
     /// The router's identity (stormlb#9): a file holding a bearer token — its
-    /// ServiceAccount's, which stormcos mints with get/list/watch on
-    /// HTTPRoutes and Services. Re-read on every poll, so it can be rotated in
+    /// ServiceAccount's, which stormcos mints with list on HTTPRoutes,
+    /// Services, Endpoints and EndpointSlices, and patch on httproutes/status
+    /// (#37). Re-read on every poll, so it can be rotated in
     /// place. Unset: anonymous, which only an apiserver with
     /// `--dev-anonymous-admin` lets list routes.
     #[serde(default)]
@@ -139,28 +158,46 @@ fn default_apiserver() -> String { "https://127.0.0.1:6443".into() }
 fn default_poll() -> u64 { 5 }
 fn default_insecure() -> bool { true }
 
-/// A route's backend: where to dial, and for TLS, the name its certificate
-/// must carry (an IP literal means an IP SAN; it is also the SNI when a name).
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Backend {
-    addr: String,
-    tls: Option<String>,
-}
+/// The longest a request head may be; past it, 431 and the connection closes.
+const MAX_HEAD: usize = 16 * 1024;
+/// How long a backend has to accept a TCP connection.
+const CONNECT: Duration = Duration::from_secs(5);
+/// Endpoints one request may try when connections fail.
+const TRIES: usize = 3;
+/// Idle backend connections kept per endpoint.
+const IDLE_PER_ENDPOINT: usize = 32;
+/// After a refused status write, how long before that route is tried again.
+const STATUS_BACKOFF: Duration = Duration::from_secs(60);
 
-/// hostname -> its backend.
-type Table = Arc<RwLock<HashMap<String, Backend>>>;
+type Body = UnsyncBoxBody<Bytes, hyper::Error>;
+
+/// The live table: swapped whole by each poll, read per request.
+type Shared = Arc<std::sync::RwLock<Arc<Table>>>;
 
 /// The connector for TLS backends, built from `backend_ca_file`; None until
 /// the file loads.
 type Upstream = Arc<std::sync::RwLock<Option<TlsConnector>>>;
 
+/// The table of the router this process runs, for `/api/v1/routes` and the
+/// metrics' per-backend series.
+static CURRENT: OnceLock<std::sync::Mutex<Option<Shared>>> = OnceLock::new();
+
+/// The table the running router serves now (None before the router starts).
+pub fn current() -> Option<Arc<Table>> {
+    let s = CURRENT.get()?.lock().unwrap().clone()?;
+    let t = s.read().unwrap().clone();
+    Some(t)
+}
+
 pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
-    let table: Table = Arc::new(RwLock::new(HashMap::new()));
+    let table: Shared = Arc::new(std::sync::RwLock::new(Arc::new(Table::default())));
+    *CURRENT.get_or_init(Default::default).lock().unwrap() = Some(table.clone());
     let mut plain = bind_listeners(&cfg.listen).await?;
     info!(listen = %cfg.listen, apiserver = %cfg.apiserver, "router up");
 
     let upstream: Upstream = Arc::default();
     tokio::spawn(poll_routes(cfg.clone(), table.clone(), upstream.clone()));
+    let pool = Arc::new(Pool::default());
 
     let mut redirect = None;
     if let Some(t) = &cfg.tls {
@@ -176,7 +213,7 @@ pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
         match bind_listeners(&t.listen).await {
             Ok(ls) => {
                 let acceptor = TlsAcceptor::from(tls::server_config(certs.clone()));
-                let front = Front { table: table.clone(), upstream: upstream.clone(), redirect: None };
+                let front = Front { table: table.clone(), upstream: upstream.clone(), redirect: None, pool: pool.clone() };
                 for l in ls {
                     tokio::spawn(serve_tls_on(l, front.clone(), acceptor.clone()));
                 }
@@ -190,7 +227,7 @@ pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
         }
     }
 
-    let front = Front { table, upstream, redirect };
+    let front = Front { table, upstream, redirect, pool };
     let first = plain.remove(0);
     // Everything after the first is served by its own task over the same
     // routes.
@@ -250,16 +287,17 @@ pub(crate) async fn bind_listeners(listen: &str) -> anyhow::Result<Vec<TcpListen
 /// clients to https.
 #[derive(Clone)]
 struct Front {
-    table: Table,
+    table: Shared,
     upstream: Upstream,
     redirect: Option<Arc<Redirect>>,
+    pool: Arc<Pool>,
 }
 
 impl Front {
-    /// Plain HTTP, no redirect.
+    /// Plain HTTP, no redirect, over this table.
     #[cfg(test)]
     fn plain(table: Table) -> Front {
-        Front { table, upstream: Arc::default(), redirect: None }
+        Front { table: Arc::new(std::sync::RwLock::new(Arc::new(table))), upstream: Arc::default(), redirect: None, pool: Arc::default() }
     }
 }
 
@@ -269,7 +307,7 @@ struct Redirect {
     port: u16,
 }
 
-/// Accept TLS, then demux.
+/// Accept TLS, then serve HTTP on it.
 async fn serve_tls_on(listener: TcpListener, front: Front, acceptor: TlsAcceptor) {
     loop {
         let (conn, peer) = match listener.accept().await {
@@ -294,14 +332,12 @@ async fn serve_tls_on(listener: TcpListener, front: Front, acceptor: TlsAcceptor
                     return tracing::debug!(%peer, "TLS handshake timed out");
                 }
             };
-            if let Err(e) = serve_conn(tls, &front, true).await {
-                tracing::debug!(%peer, "connection ended: {e}");
-            }
+            serve_http(tls, front, true, peer).await;
         });
     }
 }
 
-/// Accept and demux, on one listener.
+/// Accept and serve, on one listener.
 ///
 /// Factored out because the router listens on more than one address: its own,
 /// which clients reach, and loopback, which the health probe dials. One
@@ -313,196 +349,522 @@ async fn serve_on(listener: TcpListener, front: Front) -> anyhow::Result<()> {
         tokio::spawn(async move {
             metrics().inc("stormlb_router_connections_total", &[("listener", "http")]);
             let _active = metrics().active("stormlb_router_connections_active", &[("listener", "http")]);
-            if let Err(e) = serve_conn(conn, &front, false).await {
-                // One line per failed connection, not per byte: the common
-                // errors here are a client that went away and a backend that
-                // is down, and both are ordinary.
-                tracing::debug!(%peer, "connection ended: {e}");
-            }
+            let _ = conn.set_nodelay(true);
+            serve_http(conn, front, false, peer).await;
         });
     }
 }
 
-/// Read one request head, demux on Host, splice. `tls`: the client came in
-/// over TLS (the head gets `X-Forwarded-Proto: https`).
-async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(mut conn: S, front: &Front, tls: bool) -> anyhow::Result<()> {
-    // 16 KiB is far past any sane request head; a head that big without a
-    // blank line is not HTTP and gets cut off rather than buffered forever.
-    let mut head = Vec::with_capacity(1024);
-    let mut buf = [0u8; 2048];
-    let end = loop {
-        let n = conn.read(&mut buf).await?;
-        if n == 0 {
-            return Ok(()); // closed before a full head — nothing to do
-        }
-        head.extend_from_slice(&buf[..n]);
-        if let Some(pos) = find_head_end(&head) {
-            break pos;
-        }
-        if head.len() > 16 * 1024 {
-            anyhow::bail!("request head exceeded 16KiB without terminating");
-        }
-    };
+/// HTTP/1.1 on one client connection, each request routed on its own.
+async fn serve_http<S>(io: S, front: Front, tls: bool, peer: SocketAddr)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let svc = hyper::service::service_fn(move |req| {
+        let front = front.clone();
+        async move { Ok::<_, Infallible>(handle(req, &front, tls, peer).await) }
+    });
+    let served = server_http1::Builder::new()
+        .timer(TokioTimer::new())
+        // A client that opens a connection and sends no head is let go.
+        .header_read_timeout(Duration::from_secs(30))
+        // 16 KiB is far past any sane request head: one that big gets 431
+        // and the connection closed, not buffered forever.
+        .max_buf_size(MAX_HEAD)
+        .max_headers(256)
+        .serve_connection(TokioIo::new(io), svc)
+        .with_upgrades()
+        .await;
+    if let Err(e) = served {
+        // One line per failed connection, not per byte: the common errors
+        // here are a client that went away, and both are ordinary.
+        tracing::debug!(%peer, "connection ended: {e}");
+    }
+}
 
-    let host = match host_of(&head[..end]) {
-        Some(h) => h,
-        None => {
-            metrics().inc("stormlb_router_requests_total", &[("host", "unrouted"), ("code", "400")]);
-            let _ = conn
-                .write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 26\r\nconnection: close\r\n\r\nthis router needs a Host\n\n")
-                .await;
-            return Ok(());
-        }
-    };
+/// A body from bytes.
+fn full(b: impl Into<Bytes>) -> Body {
+    Full::new(b.into()).map_err(|n: Infallible| match n {}).boxed_unsync()
+}
 
-    let backend = { front.table.read().await.get(&host).cloned() };
+/// The router's own answer: text, and the connection closed after it.
+fn text(status: u16, body: String) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/plain")
+        .header(header::CONTENT_LENGTH, body.len())
+        .header(header::CONNECTION, "close")
+        .body(full(body))
+        .expect("a valid response")
+}
+
+/// The request's host: the Host header (or the absolute URI's), lowercased,
+/// the port dropped.
+fn host_of(req: &Request<Incoming>) -> Option<String> {
+    let raw = match req.headers().get(header::HOST) {
+        Some(h) => h.to_str().ok()?.trim().to_ascii_lowercase(),
+        None => req.uri().host()?.to_ascii_lowercase(),
+    };
+    Some(strip_port(&raw).to_string()).filter(|h| !h.is_empty())
+}
+
+fn strip_port(h: &str) -> &str {
+    if let Some(rest) = h.strip_prefix('[') {
+        // [v6]:port → v6 (as the route would name it, without brackets)
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    match h.rsplit_once(':') {
+        Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) && !host.contains(':') => host,
+        _ => h,
+    }
+}
+
+fn record(label: &str, code: u16) {
+    metrics().inc("stormlb_router_requests_total", &[("host", label), ("code", &code.to_string())]);
+}
+
+/// One request: the router's own answers, or a backend's.
+async fn handle(req: Request<Incoming>, front: &Front, tls: bool, peer: SocketAddr) -> Response<Body> {
+    let Some(host) = host_of(&req) else {
+        record("unrouted", 400);
+        return text(400, "this router needs a Host\n\n".into());
+    };
+    let table = front.table.read().unwrap().clone();
+    let path = req.uri().path().to_string();
+    let lookup = table.lookup(
+        &host,
+        &ReqView { method: req.method().as_str(), path: &path, query: req.uri().query(), headers: req.headers() },
+    );
     // The metrics' host label: a route's hostname, never a client's arbitrary
     // Host header (that would be unbounded cardinality).
-    let label = if backend.is_some() { host.as_str() } else { "unrouted" };
+    let label = match &lookup {
+        Lookup::NoHost => "unrouted".to_string(),
+        Lookup::NoMatch(l) | Lookup::Rule(_, l) => l.clone(),
+    };
 
     // Plain HTTP goes to https once there is a certificate to serve it with,
     // except the health probe, which stays on plain HTTP.
     if let Some(r) = front.redirect.as_ref().filter(|r| !tls && r.certs.count() > 0) {
-        if request_path(&head[..end]) != Some("/healthz") {
+        if path != "/healthz" {
             let port = if r.port == 443 { String::new() } else { format!(":{}", r.port) };
-            let target = request_target(&head[..end]).unwrap_or("/");
-            let resp = format!(
-                "HTTP/1.1 308 Permanent Redirect\r\nlocation: https://{host}{port}{target}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-            );
-            metrics().inc("stormlb_router_requests_total", &[("host", label), ("code", "308")]);
-            let _ = conn.write_all(resp.as_bytes()).await;
-            return Ok(());
+            let target = req.uri().path_and_query().map(|p| p.as_str()).filter(|t| t.starts_with('/')).unwrap_or("/");
+            record(&label, 308);
+            return Response::builder()
+                .status(308)
+                .header(header::LOCATION, format!("https://{host}{port}{target}"))
+                .header(header::CONTENT_LENGTH, 0)
+                .header(header::CONNECTION, "close")
+                .body(full(Bytes::new()))
+                .expect("a valid response");
         }
     }
 
-    // The router's own liveness, on any host no route claims: stormd probes
-    // http://127.0.0.1/healthz, and 127.0.0.1 is never a route's hostname.
-    // A host a route *does* claim proxies /healthz to its backend untouched.
-    if backend.is_none() && request_path(&head[..end]) == Some("/healthz") {
-        // Explicit CRLF, like the 400 and 404: this literal once spanned
-        // source lines and sent bare LF, which only lenient clients accept.
-        let body = "router alive\n";
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        metrics().inc("stormlb_router_requests_total", &[("host", "unrouted"), ("code", "200")]);
-        let _ = conn.write_all(resp.as_bytes()).await;
-        return Ok(());
-    }
-    let Some(backend) = backend else {
+    match lookup {
+        // The router's own liveness, on any host no route claims: stormd
+        // probes http://127.0.0.1/healthz, and 127.0.0.1 is never a route's
+        // hostname. A host a route *does* claim proxies /healthz untouched.
+        Lookup::NoHost if path == "/healthz" => {
+            record("unrouted", 200);
+            text(200, "router alive\n".into())
+        }
         // Name the host: "404 from the router" and "404 from the app" look
         // identical from a browser, and the debugging path for each is
         // different. The body says which one this is and for what name.
-        let body = format!("no route for host {host}\n");
-        let resp = format!(
-            "HTTP/1.1 404 Not Found\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        metrics().inc("stormlb_router_requests_total", &[("host", "unrouted"), ("code", "404")]);
-        let _ = conn.write_all(resp.as_bytes()).await;
-        return Ok(());
-    };
+        Lookup::NoHost => {
+            record("unrouted", 404);
+            text(404, format!("no route for host {host}\n"))
+        }
+        Lookup::NoMatch(l) => {
+            record(&l, 404);
+            text(404, format!("no rule of the routes for host {host} matches {} {path}\n", req.method()))
+        }
+        Lookup::Rule(rule, l) => proxy(req, rule, &l, &host, front, tls, peer).await,
+    }
+}
 
-    let fail = |kind: &str| {
-        metrics().inc("stormlb_router_upstream_errors_total", &[("host", &host), ("kind", kind)]);
-        metrics().inc("stormlb_router_requests_total", &[("host", &host), ("code", "error")]);
+/// Is this an `Upgrade` request (websockets and the like)?
+fn is_upgrade(h: &HeaderMap) -> bool {
+    h.contains_key(header::UPGRADE)
+        && h.get_all(header::CONNECTION)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .any(|t| t.trim().eq_ignore_ascii_case("upgrade"))
+}
+
+/// Drop the hop-by-hop headers (RFC 9110 §7.6.1): those `Connection` names,
+/// and Keep-Alive, Proxy-Connection, TE, Trailer, Transfer-Encoding,
+/// Upgrade. An upgrade keeps `Connection: upgrade` and `Upgrade`.
+fn strip_hop_by_hop(h: &mut HeaderMap, upgrade: bool) {
+    let listed: Vec<HeaderName> = h
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .filter_map(|t| HeaderName::from_bytes(t.trim().as_bytes()).ok())
+        .collect();
+    for n in listed {
+        if !(upgrade && n == header::UPGRADE) {
+            h.remove(n);
+        }
+    }
+    for n in ["keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding"] {
+        h.remove(n);
+    }
+    h.remove(header::CONNECTION);
+    if upgrade {
+        h.insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+    } else {
+        h.remove(header::UPGRADE);
+    }
+}
+
+/// The request a retry sends: everything but the body (only bodyless
+/// requests are retried after they were sent).
+struct Template {
+    method: http::Method,
+    uri: Uri,
+    headers: HeaderMap,
+}
+
+impl Template {
+    fn build(&self) -> Request<Body> {
+        let mut r = Request::new(Empty::<Bytes>::new().map_err(|n: Infallible| match n {}).boxed_unsync());
+        *r.method_mut() = self.method.clone();
+        *r.uri_mut() = self.uri.clone();
+        *r.headers_mut() = self.headers.clone();
+        r
+    }
+}
+
+/// Why a request got no backend response.
+enum Fail {
+    /// The rule has no backend to send it to: (status, text).
+    NoBackend(u16, String),
+    /// No endpoint could be connected to.
+    Unreachable(String),
+    /// Sent, and no response came.
+    NoResponse(String),
+    /// `timeouts.request` or `backendRequest` ran out.
+    Timeout(Duration),
+}
+
+/// Send the request to the rule's backends: connect failures move on to
+/// another endpoint, and the rule's `retry` codes are retried for a request
+/// without a body.
+async fn proxy(
+    mut req: Request<Incoming>,
+    rule: Arc<Rule>,
+    label: &str,
+    host: &str,
+    front: &Front,
+    tls: bool,
+    peer: SocketAddr,
+) -> Response<Body> {
+    let upgrade = is_upgrade(req.headers());
+    let client_upgrade = upgrade.then(|| hyper::upgrade::on(&mut req));
+    let host_header = req.headers().get(header::HOST).cloned();
+    {
+        let h = req.headers_mut();
+        strip_hop_by_hop(h, upgrade);
+        let xff = match h.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            Some(v) => format!("{v}, {}", peer.ip()),
+            None => peer.ip().to_string(),
+        };
+        if let Ok(v) = HeaderValue::from_str(&xff) {
+            h.insert("x-forwarded-for", v);
+        }
+        match &host_header {
+            Some(v) => {
+                if !h.contains_key("x-forwarded-host") {
+                    h.insert("x-forwarded-host", v.clone());
+                }
+            }
+            None => {
+                if let Ok(v) = HeaderValue::from_str(host) {
+                    h.insert(header::HOST, v);
+                }
+            }
+        }
+        // Never a client's claim: the scheme it actually came in on.
+        h.insert("x-forwarded-proto", HeaderValue::from_static(if tls { "https" } else { "http" }));
+    }
+    let pq = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/").to_string();
+    *req.uri_mut() = pq.parse().unwrap_or_else(|_| Uri::from_static("/"));
+    *req.version_mut() = http::Version::HTTP_11;
+    let bodyless = req.body().is_end_stream();
+    let template = Template { method: req.method().clone(), uri: req.uri().clone(), headers: req.headers().clone() };
+    let first = req.map(|b| b.boxed_unsync());
+
+    let started = Instant::now();
+    let work = attempts(first, &template, bodyless, upgrade, &rule, label, front);
+    let result = match rule.timeout {
+        Some(d) => tokio::time::timeout(d, work).await.unwrap_or(Err(Fail::Timeout(d))),
+        None => work.await,
     };
-    let tcp = match TcpStream::connect(&backend.addr).await {
-        Ok(u) => u,
-        Err(e) => {
-            fail("connect");
-            anyhow::bail!("backend {} for {host}: {e}", backend.addr);
+    let (resp, backend) = match result {
+        Ok(x) => x,
+        Err(f) => {
+            let (code, msg, kind) = match f {
+                Fail::NoBackend(c, m) => (c, m, None),
+                Fail::Unreachable(e) => (502, format!("no endpoint of the backend for host {host} could be reached: {e}"), None),
+                Fail::NoResponse(e) => (502, format!("the backend for host {host} gave no response: {e}"), Some("no_response")),
+                Fail::Timeout(d) => (504, format!("the backend for host {host} did not answer within {} ms", d.as_millis()), Some("timeout")),
+            };
+            if let Some(k) = kind {
+                metrics().inc("stormlb_router_upstream_errors_total", &[("host", label), ("kind", k)]);
+            }
+            record(label, code);
+            return text(code, msg + "\n");
         }
     };
-    let head = if tls { forwarded_https(&head, end) } else { head };
-    let Some(name) = &backend.tls else {
-        return forward(conn, tcp, &head, &host).await;
-    };
-    // TLS to the backend, verified against the CA, or nothing at all.
-    let Some(connector) = front.upstream.read().unwrap().clone() else {
-        fail("tls");
-        anyhow::bail!("backend {} for {host} is https, but no [router] backend_ca_file is loaded", backend.addr);
-    };
-    let server = tokio_rustls::rustls::pki_types::ServerName::try_from(name.clone())
-        .map_err(|e| anyhow::anyhow!("backend name {name:?} for {host}: {e}"))?;
-    match tokio::time::timeout(Duration::from_secs(10), connector.connect(server, tcp)).await {
-        Ok(Ok(s)) => forward(conn, s, &head, &host).await,
-        Ok(Err(e)) => {
-            fail("tls");
-            anyhow::bail!("TLS to backend {} ({name}) for {host}: {e}", backend.addr)
+    let code = resp.status().as_u16();
+    metrics().observe("stormlb_router_request_duration_seconds", &[("host", label)], started.elapsed());
+    record(label, code);
+    metrics().inc(
+        "stormlb_router_backend_requests_total",
+        &[("route", &rule.route), ("backend", &backend.name), ("code", &code.to_string())],
+    );
+
+    let mut resp = resp;
+    if code == 101 {
+        if let Some(cu) = client_upgrade {
+            let su = hyper::upgrade::on(&mut resp);
+            tokio::spawn(async move {
+                match (cu.await, su.await) {
+                    (Ok(c), Ok(s)) => {
+                        let _ = tokio::io::copy_bidirectional(&mut TokioIo::new(c), &mut TokioIo::new(s)).await;
+                    }
+                    (Err(e), _) | (_, Err(e)) => tracing::debug!("upgrade failed: {e}"),
+                }
+            });
         }
-        Err(_) => {
-            fail("tls");
-            anyhow::bail!("TLS to backend {} ({name}) for {host}: handshake timed out", backend.addr)
+        return resp.map(|b| b.boxed_unsync());
+    }
+    let close = resp
+        .headers()
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|t| t.trim().eq_ignore_ascii_case("close"));
+    strip_hop_by_hop(resp.headers_mut(), false);
+    if close {
+        // The backend closes after this response; so does the client's
+        // connection, as it would without a router in between.
+        resp.headers_mut().insert(header::CONNECTION, HeaderValue::from_static("close"));
+    }
+    resp.map(|b| b.boxed_unsync())
+}
+
+/// The attempts of one request. Ok: the backend's response (its head; the
+/// body streams on) and the backend that gave it.
+async fn attempts(
+    first: Request<Body>,
+    template: &Template,
+    bodyless: bool,
+    upgrade: bool,
+    rule: &Rule,
+    label: &str,
+    front: &Front,
+) -> Result<(Response<Incoming>, Arc<routes::Backend>), Fail> {
+    let mut first = Some(first);
+    let mut tried: Vec<String> = Vec::new();
+    let mut failures = 0usize;
+    let mut stale = 0usize;
+    let mut code_retries = if upgrade { 0 } else { rule.retry.attempts };
+    let mut last = String::new();
+    loop {
+        let backend = rule.choose().map_err(|(c, m)| Fail::NoBackend(c, m))?;
+        let Some(ep) = backend.pick(&tried) else {
+            return Err(if tried.is_empty() {
+                Fail::NoBackend(503, format!("no healthy endpoint for route {} backend {}", rule.route, backend.name))
+            } else {
+                Fail::Unreachable(last)
+            });
+        };
+        tried.push(ep.addr.clone());
+        let key = format!("{}|{:?}", ep.addr, backend.proto.server_name(&ep.addr));
+        let sender = match front.pool.take(&key) {
+            Some(s) => s,
+            None => match connect(&ep, &backend.proto, &front.upstream).await {
+                Ok(s) => s,
+                Err((kind, e)) => {
+                    if kind == "connect" {
+                        ep.eject();
+                    }
+                    metrics().inc("stormlb_router_upstream_errors_total", &[("host", label), ("kind", kind)]);
+                    tracing::debug!(endpoint = %ep.addr, "{e}");
+                    last = e;
+                    failures += 1;
+                    if failures < TRIES {
+                        continue;
+                    }
+                    return Err(Fail::Unreachable(last));
+                }
+            },
+        };
+        let req = match first.take() {
+            Some(r) => r,
+            None if bodyless => template.build(),
+            None => return Err(Fail::NoResponse(last)),
+        };
+        ep.active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let sent = send(sender, req, rule.backend_timeout).await;
+        ep.active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        match sent {
+            Ok((resp, sender)) => {
+                let code = resp.status().as_u16();
+                if code_retries > 0 && bodyless && rule.retry.codes.contains(&code) {
+                    code_retries -= 1;
+                    last = format!("{} answered {code}", ep.addr);
+                    drop((resp, sender));
+                    tried.retain(|a| a != &ep.addr);
+                    tokio::time::sleep(rule.retry.backoff).await;
+                    continue;
+                }
+                if code != 101 {
+                    front.pool.keep(key, sender);
+                }
+                return Ok((resp, backend));
+            }
+            Err(Sent::Unsent(req, e)) => {
+                // A kept connection the backend had closed: the request was
+                // never written, so it goes out again on a fresh one.
+                first = Some(req);
+                tried.pop();
+                stale += 1;
+                last = e;
+                if stale > IDLE_PER_ENDPOINT {
+                    return Err(Fail::NoResponse(last));
+                }
+            }
+            Err(Sent::Failed(e)) => {
+                metrics().inc("stormlb_router_upstream_errors_total", &[("host", label), ("kind", "no_response")]);
+                last = format!("{}: {e}", ep.addr);
+                failures += 1;
+                if !(bodyless && failures < TRIES) {
+                    return Err(Fail::NoResponse(last));
+                }
+            }
+            Err(Sent::TimedOut(d)) => {
+                metrics().inc("stormlb_router_upstream_errors_total", &[("host", label), ("kind", "timeout")]);
+                return Err(Fail::Timeout(d));
+            }
         }
     }
 }
 
-/// Send the head to the backend, then splice.
-async fn forward<S, U>(conn: S, mut upstream: U, head: &[u8], host: &str) -> anyhow::Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-    U: AsyncRead + AsyncWrite + Unpin,
-{
-    upstream.write_all(head).await?;
-    let sent = std::time::Instant::now();
-    splice(conn, upstream, host, sent).await
+/// How sending one request on one connection ended, short of a response.
+enum Sent {
+    /// Not written (the connection was already closed): the request back.
+    Unsent(Request<Body>, String),
+    Failed(String),
+    TimedOut(Duration),
 }
 
-/// Copy both ways until both directions end, as `copy_bidirectional` does,
-/// but read the backend's first bytes on the way: its status code and the
-/// time to them are the request's metrics. The client→backend half runs
-/// concurrently throughout, so a request body is never held back waiting for
-/// a response that waits for it.
-async fn splice<S, U>(conn: S, upstream: U, host: &str, sent: std::time::Instant) -> anyhow::Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-    U: AsyncRead + AsyncWrite + Unpin,
-{
-    let (mut cr, mut cw) = tokio::io::split(conn);
-    let (mut ur, mut uw) = tokio::io::split(upstream);
-    let up = async {
-        let r = tokio::io::copy(&mut cr, &mut uw).await;
-        let _ = uw.shutdown().await;
-        r
+async fn send(
+    mut s: client_http1::SendRequest<Body>,
+    req: Request<Body>,
+    timeout: Option<Duration>,
+) -> Result<(Response<Incoming>, client_http1::SendRequest<Body>), Sent> {
+    if s.ready().await.is_err() {
+        return Err(Sent::Unsent(req, "the kept connection had closed".into()));
+    }
+    let fut = s.try_send_request(req);
+    let r = match timeout {
+        Some(d) => match tokio::time::timeout(d, fut).await {
+            Ok(r) => r,
+            Err(_) => return Err(Sent::TimedOut(d)),
+        },
+        None => fut.await,
     };
-    let down = async {
-        let mut buf = vec![0u8; 16 * 1024];
-        let n = match ur.read(&mut buf).await {
-            Ok(n) => n,
-            Err(e) => {
-                record_first(host, None, sent);
-                return Err(e);
+    match r {
+        Ok(resp) => Ok((resp, s)),
+        Err(mut e) => match e.take_message() {
+            Some(req) => Err(Sent::Unsent(req, e.into_error().to_string())),
+            None => Err(Sent::Failed(e.into_error().to_string())),
+        },
+    }
+}
+
+/// A new connection to an endpoint: TCP, then TLS for an https backend.
+/// Err: (metrics kind, text).
+async fn connect(
+    ep: &Endpoint,
+    proto: &Proto,
+    upstream: &Upstream,
+) -> Result<client_http1::SendRequest<Body>, (&'static str, String)> {
+    let tcp = match tokio::time::timeout(CONNECT, TcpStream::connect(&ep.addr)).await {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => return Err(("connect", format!("{}: {e}", ep.addr))),
+        Err(_) => return Err(("connect", format!("{}: no connection in {} s", ep.addr, CONNECT.as_secs()))),
+    };
+    let _ = tcp.set_nodelay(true);
+    let Some(name) = proto.server_name(&ep.addr) else {
+        return handshake(tcp).await;
+    };
+    // TLS to the backend, verified against the CA, or nothing at all.
+    let Some(connector) = upstream.read().unwrap().clone() else {
+        return Err(("tls", format!("{} is https, but no [router] backend_ca_file is loaded", ep.addr)));
+    };
+    let server = tokio_rustls::rustls::pki_types::ServerName::try_from(name.clone())
+        .map_err(|e| ("tls", format!("backend name {name:?}: {e}")))?;
+    match tokio::time::timeout(Duration::from_secs(10), connector.connect(server, tcp)).await {
+        Ok(Ok(s)) => handshake(s).await,
+        Ok(Err(e)) => Err(("tls", format!("TLS to {} ({name}): {e}", ep.addr))),
+        Err(_) => Err(("tls", format!("TLS to {} ({name}): handshake timed out", ep.addr))),
+    }
+}
+
+async fn handshake<S>(io: S) -> Result<client_http1::SendRequest<Body>, (&'static str, String)>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (s, conn) = client_http1::Builder::new()
+        .title_case_headers(true)
+        .handshake(TokioIo::new(io))
+        .await
+        .map_err(|e| ("connect", format!("HTTP handshake: {e}")))?;
+    tokio::spawn(async move {
+        if let Err(e) = conn.with_upgrades().await {
+            tracing::debug!("backend connection: {e}");
+        }
+    });
+    Ok(s)
+}
+
+/// Idle backend connections, by endpoint (and TLS name).
+#[derive(Default)]
+struct Pool {
+    idle: std::sync::Mutex<HashMap<String, Vec<client_http1::SendRequest<Body>>>>,
+}
+
+impl Pool {
+    fn take(&self, key: &str) -> Option<client_http1::SendRequest<Body>> {
+        let mut m = self.idle.lock().unwrap();
+        let v = m.get_mut(key)?;
+        while let Some(s) = v.pop() {
+            if !s.is_closed() {
+                return Some(s);
             }
-        };
-        record_first(host, (n > 0).then(|| &buf[..n]), sent);
-        if n > 0 {
-            cw.write_all(&buf[..n]).await?;
-            tokio::io::copy(&mut ur, &mut cw).await?;
         }
-        let _ = cw.shutdown().await;
-        Ok::<_, std::io::Error>(())
-    };
-    let (u, d) = tokio::join!(up, down);
-    d?;
-    u?;
-    Ok(())
-}
+        None
+    }
 
-/// Record a proxied request: the status of the backend's first bytes, or an
-/// upstream error when it sent none.
-fn record_first(host: &str, first: Option<&[u8]>, sent: std::time::Instant) {
-    match first {
-        Some(b) => {
-            metrics().observe("stormlb_router_request_duration_seconds", &[("host", host)], sent.elapsed());
-            let code = status_code(b).unwrap_or("other");
-            metrics().inc("stormlb_router_requests_total", &[("host", host), ("code", code)]);
-        }
-        None => {
-            metrics().inc("stormlb_router_upstream_errors_total", &[("host", host), ("kind", "no_response")]);
-            metrics().inc("stormlb_router_requests_total", &[("host", host), ("code", "error")]);
-        }
+    /// Keep the connection once its response is done (if it stays open).
+    fn keep(self: &Arc<Self>, key: String, mut s: client_http1::SendRequest<Body>) {
+        let pool = self.clone();
+        tokio::spawn(async move {
+            if s.ready().await.is_ok() {
+                let mut m = pool.idle.lock().unwrap();
+                let v = m.entry(key).or_default();
+                v.retain(|s| !s.is_closed());
+                if v.len() < IDLE_PER_ENDPOINT {
+                    v.push(s);
+                }
+            }
+        });
     }
 }
 
@@ -513,71 +875,63 @@ fn status_code(b: &[u8]) -> Option<&str> {
     code.bytes().all(|c| c.is_ascii_digit()).then_some(code)
 }
 
-/// The request path, from the request line.
-fn request_path(head: &[u8]) -> Option<&str> {
-    let line = head.split(|&b| b == b'\n').next()?;
-    let line = std::str::from_utf8(line).ok()?;
-    let path = line.split_whitespace().nth(1)?;
-    Some(path.split('?').next().unwrap_or(path))
-}
-
-/// The request target (path and query), from the request line.
-fn request_target(head: &[u8]) -> Option<&str> {
-    let line = head.split(|&b| b == b'\n').next()?;
-    std::str::from_utf8(line).ok()?.split_whitespace().nth(1).filter(|t| t.starts_with('/'))
-}
-
-/// The head with `X-Forwarded-Proto: https` after the request line, and any
-/// the client sent dropped (it must not claim a scheme it did not use), plus
-/// whatever followed the head (`head[end..]`) unchanged.
-fn forwarded_https(head: &[u8], end: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(head.len() + 32);
-    let mut lines = head[..end].split_inclusive(|&b| b == b'\n');
-    if let Some(first) = lines.next() {
-        out.extend_from_slice(first);
-    }
-    out.extend_from_slice(b"X-Forwarded-Proto: https\r\n");
-    for l in lines {
-        let name = l.split(|&b| b == b':').next().unwrap_or(&[]);
-        if name.eq_ignore_ascii_case(b"x-forwarded-proto") {
-            continue;
+/// One endpoint's active check, every interval, until the endpoint leaves
+/// the table.
+async fn check_loop(c: NewCheck, upstream: Upstream) {
+    loop {
+        let Some(ep) = c.endpoint.upgrade() else { return };
+        let ok = probe(&ep.addr, &c.spec, &c.proto, &upstream).await;
+        match ep.record_check(ok, &c.spec) {
+            Some(true) => info!(endpoint = %ep.addr, path = %c.spec.path, "health check passing: back in rotation"),
+            Some(false) => warn!(endpoint = %ep.addr, path = %c.spec.path, "health check failing: out of rotation"),
+            None => {}
         }
-        out.extend_from_slice(l);
+        drop(ep);
+        tokio::time::sleep(c.spec.interval).await;
     }
-    out.extend_from_slice(&head[end..]);
-    out
 }
 
-fn find_head_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
-}
-
-/// The Host header's value, lowercased, port stripped.
-fn host_of(head: &[u8]) -> Option<String> {
-    for line in head.split(|&b| b == b'\n').skip(1) {
-        let line = std::str::from_utf8(line).ok()?.trim();
-        if line.is_empty() {
-            break;
-        }
-        if let Some((k, v)) = line.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("host") {
-                let v = v.trim().to_ascii_lowercase();
-                let v = v.rsplit_once(':').map(|(h, p)| {
-                    if p.chars().all(|c| c.is_ascii_digit()) { h.to_string() } else { v.clone() }
-                }).unwrap_or(v);
-                return Some(v);
+/// GET the check path; 2xx and 3xx pass.
+async fn probe(addr: &str, spec: &routes::CheckSpec, proto: &Proto, upstream: &Upstream) -> bool {
+    let host = spec.host.clone().unwrap_or_else(|| addr.to_string());
+    let req = format!("GET {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: stormlb-health\r\nConnection: close\r\n\r\n", spec.path);
+    let check = async {
+        let tcp = TcpStream::connect(addr).await.ok()?;
+        match proto.server_name(addr) {
+            None => status_of(tcp, &req).await,
+            Some(name) => {
+                let c = upstream.read().unwrap().clone()?;
+                let server = tokio_rustls::rustls::pki_types::ServerName::try_from(name).ok()?;
+                status_of(c.connect(server, tcp).await.ok()?, &req).await
             }
         }
+    };
+    matches!(tokio::time::timeout(spec.timeout, check).await, Ok(Some(code)) if (200..400).contains(&code))
+}
+
+async fn status_of<S: AsyncRead + AsyncWrite + Unpin>(mut s: S, req: &str) -> Option<u16> {
+    s.write_all(req.as_bytes()).await.ok()?;
+    let mut buf = [0u8; 64];
+    let mut n = 0;
+    while n < 12 {
+        let m = s.read(&mut buf[n..]).await.ok()?;
+        if m == 0 {
+            break;
+        }
+        n += m;
     }
-    None
+    status_code(&buf[..n])?.parse().ok()
 }
 
 /// Refresh the table forever. Serves the last good table across errors.
-/// Each turn also re-reads `backend_ca_file` if it changed.
-async fn poll_routes(cfg: RouterCfg, table: Table, upstream: Upstream) {
+/// Each turn also re-reads `backend_ca_file` if it changed, and writes the
+/// routes' status where it changed.
+async fn poll_routes(cfg: RouterCfg, table: Shared, upstream: Upstream) {
     let mut ca = CaState::default();
     let mut api = ApiClient::default();
+    let mut known = Known::default();
     let mut said = None::<String>;
+    let mut status = StatusLog::default();
     let mut last_len = usize::MAX;
     loop {
         if let Some(path) = &cfg.backend_ca_file {
@@ -586,19 +940,28 @@ async fn poll_routes(cfg: RouterCfg, table: Table, upstream: Upstream) {
             }
         }
         let fetched = match (api.client(&cfg), read_token(&cfg)) {
-            (Ok(client), Ok(token)) => fetch_table(&client, &cfg.apiserver, token.as_deref()).await,
+            (Ok(client), Ok(token)) => match fetch_objects(&client, &cfg.apiserver, token.as_deref()).await {
+                Ok(o) => Ok((o, client, token)),
+                Err(e) => Err(e),
+            },
             (Err(e), _) | (_, Err(e)) => Err(e),
         };
         match fetched {
-            Ok(new) => {
-                metrics().inc("stormlb_router_route_refreshes_total", &[("result", "ok")]);
-                metrics().gauge_set("stormlb_router_routes", &[], new.len() as i64);
-                if new.len() != last_len {
-                    info!(routes = new.len(), "route table refreshed");
-                    last_len = new.len();
+            Ok((objs, client, token)) => {
+                let (new, checks) = routes::build(&objs, &mut known);
+                for c in checks {
+                    tokio::spawn(check_loop(c, upstream.clone()));
                 }
-                *table.write().await = new;
+                metrics().inc("stormlb_router_route_refreshes_total", &[("result", "ok")]);
+                metrics().gauge_set("stormlb_router_routes", &[], new.hosts() as i64);
+                if new.hosts() != last_len {
+                    info!(routes = new.hosts(), "route table refreshed");
+                    last_len = new.hosts();
+                }
+                let new = Arc::new(new);
+                *table.write().unwrap() = new.clone();
                 said = None;
+                status.write(&client, &cfg.apiserver, token.as_deref(), &new).await;
             }
             Err(e) => {
                 metrics().inc("stormlb_router_route_refreshes_total", &[("result", "error")]);
@@ -611,6 +974,58 @@ async fn poll_routes(cfg: RouterCfg, table: Table, upstream: Upstream) {
             }
         }
         tokio::time::sleep(Duration::from_secs(cfg.poll_secs.max(1))).await;
+    }
+}
+
+/// What was said about each route: its problems, and its last refused
+/// status write (and when), so each is logged once.
+#[derive(Default)]
+struct StatusLog {
+    problems: HashMap<String, String>,
+    refused: HashMap<String, (String, Instant)>,
+}
+
+impl StatusLog {
+    async fn write(&mut self, client: &reqwest::Client, api: &str, token: Option<&str>, t: &Table) {
+        let now = routes::now_rfc3339();
+        for r in &t.routes {
+            let key = format!("{}/{}", r.namespace, r.name);
+            let problems: Vec<String> = routes::conditions(r)
+                .into_iter()
+                .filter(|(ty, ok, ..)| (*ty == "PartiallyInvalid") == *ok && *ty != "storm.io/BackendsHealthy")
+                .map(|(ty, _, reason, msg)| format!("{ty} {reason}: {msg}"))
+                .collect();
+            let p = problems.join("; ");
+            if self.problems.get(&key) != Some(&p) {
+                if !p.is_empty() {
+                    warn!(route = %key, "{p}");
+                }
+                self.problems.insert(key.clone(), p);
+            }
+            if self.refused.get(&key).is_some_and(|(_, at)| at.elapsed() < STATUS_BACKOFF) {
+                continue;
+            }
+            let Some(parents) = routes::status_parents(r, &now) else { continue };
+            let url = format!(
+                "{api}/apis/gateway.networking.k8s.io/v1/namespaces/{}/httproutes/{}/status",
+                r.namespace, r.name
+            );
+            match api_merge_patch(client, &url, token, &serde_json::json!({"status": {"parents": parents}})).await {
+                Ok(()) => {
+                    self.refused.remove(&key);
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    if self.refused.get(&key).map(|(m, _)| m) != Some(&msg) {
+                        warn!(route = %key, "status not written (routing is unaffected): {msg}");
+                    }
+                    self.refused.insert(key, (msg, Instant::now()));
+                }
+            }
+        }
+        let live: std::collections::HashSet<String> = t.routes.iter().map(|r| format!("{}/{}", r.namespace, r.name)).collect();
+        self.problems.retain(|k, _| live.contains(k));
+        self.refused.retain(|k, _| live.contains(k));
     }
 }
 
@@ -670,24 +1085,6 @@ fn read_token(cfg: &RouterCfg) -> anyhow::Result<Option<String>> {
     Ok(Some(t.to_string()))
 }
 
-/// GET a JSON object from the apiserver, as the router. A 401/403 says what
-/// to fix.
-async fn api_get(client: &reqwest::Client, url: &str, token: Option<&str>) -> anyhow::Result<serde_json::Value> {
-    let mut req = client.get(url);
-    if let Some(t) = token {
-        req = req.bearer_auth(t);
-    }
-    let resp = req.send().await?;
-    let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        let who = if token.is_some() { "the router's token (token_file)" } else { "anonymous (no [router] token_file)" };
-        anyhow::bail!(
-            "{status} for {url}: {who} may not read it — the router needs get/list on httproutes and get on services (stormlb#9)"
-        );
-    }
-    Ok(resp.error_for_status()?.json().await?)
-}
-
 /// `backend_ca_file`'s last load: its mtime, and the last error logged (so a
 /// missing file is said once).
 #[derive(Default)]
@@ -739,157 +1136,214 @@ fn upstream_connector(path: &str) -> anyhow::Result<TlsConnector> {
     Ok(TlsConnector::from(Arc::new(cfg)))
 }
 
-async fn fetch_table(
-    client: &reqwest::Client,
-    api: &str,
-    token: Option<&str>,
-) -> anyhow::Result<HashMap<String, Backend>> {
-    let url = format!("{api}/apis/gateway.networking.k8s.io/v1/httproutes");
-    let list = api_get(client, &url, token).await?;
-    let mut out = HashMap::new();
-    for r in list["items"].as_array().into_iter().flatten() {
-        let ns = r["metadata"]["namespace"].as_str().unwrap_or("default");
-        let name = r["metadata"]["name"].as_str().unwrap_or("");
-        let backend = match backend_of(client, api, token, ns, r).await.and_then(|addr| with_protocol(r, addr)) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!(route = %format!("{ns}/{name}"), "no usable backend: {e}");
-                continue;
-            }
-        };
-        for h in r["spec"]["hostnames"].as_array().into_iter().flatten() {
-            if let Some(h) = h.as_str() {
-                out.insert(h.to_ascii_lowercase(), backend.clone());
-            }
-        }
+/// Every object one table needs: the HTTPRoutes, and — when a route has a
+/// backendRef — the Services, EndpointSlices and Endpoints of every
+/// namespace (three lists a poll, however many routes). A list the
+/// apiserver does not serve (404) is absent; any other failure fails the
+/// refresh, so the last good table stays.
+async fn fetch_objects(client: &reqwest::Client, api: &str, token: Option<&str>) -> anyhow::Result<routes::Objects> {
+    let list = api_list(client, &format!("{api}/apis/gateway.networking.k8s.io/v1/httproutes"), token)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the apiserver serves no HTTPRoutes (404)"))?;
+    let mut o = routes::Objects { routes: list["items"].as_array().cloned().unwrap_or_default(), ..Default::default() };
+    let needs_backends = o.routes.iter().any(|r| {
+        r["metadata"]["annotations"]["storm.io/backend"].is_null()
+            && r["spec"]["rules"].as_array().into_iter().flatten().any(|rule| rule["backendRefs"].as_array().is_some_and(|b| !b.is_empty()))
+    });
+    if !needs_backends {
+        return Ok(o);
     }
-    Ok(out)
+    match api_list(client, &format!("{api}/api/v1/services"), token).await? {
+        Some(v) => o.index_services(&v),
+        None => o.services_error = Some("the apiserver serves no Services (404)".into()),
+    }
+    if let Some(v) = api_list(client, &format!("{api}/apis/discovery.k8s.io/v1/endpointslices"), token).await? {
+        o.index_slices(&v);
+    }
+    if let Some(v) = api_list(client, &format!("{api}/api/v1/endpoints"), token).await? {
+        o.index_endpoints(&v);
+    }
+    Ok(o)
 }
 
-/// The backend with the route's protocol: `storm.io/backend-protocol`
-/// `http` (or absent) or `https`; for https, the name to verify is
-/// `storm.io/backend-server-name`, else the address's host.
-fn with_protocol(route: &serde_json::Value, addr: String) -> anyhow::Result<Backend> {
-    let a = &route["metadata"]["annotations"];
-    match a["storm.io/backend-protocol"].as_str().map(str::to_ascii_lowercase).as_deref() {
-        None | Some("http") => Ok(Backend { addr, tls: None }),
-        Some("https") => {
-            let name = match a["storm.io/backend-server-name"].as_str() {
-                Some(n) => n.to_string(),
-                None => {
-                    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&addr);
-                    host.trim_start_matches('[').trim_end_matches(']').to_string()
-                }
-            };
-            Ok(Backend { addr, tls: Some(name) })
-        }
-        Some(p) => anyhow::bail!("storm.io/backend-protocol {p:?}: want http or https"),
+/// GET a list as the router; None on 404. A 401/403 says what to fix.
+async fn api_list(client: &reqwest::Client, url: &str, token: Option<&str>) -> anyhow::Result<Option<serde_json::Value>> {
+    let mut req = client.get(url);
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
     }
+    let resp = req.send().await?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        let who = if token.is_some() { "the router's token (token_file)" } else { "anonymous (no [router] token_file)" };
+        anyhow::bail!(
+            "{status} for {url}: {who} may not read it — the router needs list on httproutes, services, \
+             endpoints and endpointslices, and patch on httproutes/status (stormlb#9, #37)"
+        );
+    }
+    Ok(Some(resp.error_for_status()?.json().await?))
 }
 
-async fn backend_of(
-    client: &reqwest::Client,
-    api: &str,
-    token: Option<&str>,
-    ns: &str,
-    route: &serde_json::Value,
-) -> anyhow::Result<String> {
-    if let Some(b) = route["metadata"]["annotations"]["storm.io/backend"].as_str() {
-        return Ok(b.to_string());
+/// A JSON merge-patch, as the router.
+async fn api_merge_patch(client: &reqwest::Client, url: &str, token: Option<&str>, body: &serde_json::Value) -> anyhow::Result<()> {
+    let mut req = client.patch(url).header("content-type", "application/merge-patch+json").body(body.to_string());
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
     }
-    let bref = &route["spec"]["rules"][0]["backendRefs"][0];
-    let svc = bref["name"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("no storm.io/backend annotation and no backendRef"))?;
-    let port = bref["port"].as_u64().unwrap_or(80);
-    let sns = bref["namespace"].as_str().unwrap_or(ns);
-    let url = format!("{api}/api/v1/namespaces/{sns}/services/{svc}");
-    let s = api_get(client, &url, token).await?;
-    let ip = s["spec"]["clusterIP"]
-        .as_str()
-        .filter(|ip| !ip.is_empty() && *ip != "None")
-        .ok_or_else(|| anyhow::anyhow!("service {sns}/{svc} has no clusterIP"))?;
-    Ok(format!("{ip}:{port}"))
+    let resp = req.send().await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        let text: String = text.chars().take(200).collect();
+        anyhow::bail!("{status} for {url}: {}", text.trim());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
-    #[test]
-    fn the_host_header_is_found_case_insensitively_and_port_stripped() {
-        let head = b"GET / HTTP/1.1\r\nUser-Agent: x\r\nHOST: Console.Storm1.G8.lo:80\r\n\r\n";
-        assert_eq!(host_of(head).as_deref(), Some("console.storm1.g8.lo"));
+    fn table(routes: Vec<serde_json::Value>) -> Table {
+        let objs = routes::Objects { routes, ..Default::default() };
+        routes::build(&objs, &mut Known::default()).0
     }
 
-    #[test]
-    fn a_missing_host_is_none_not_a_panic() {
-        assert_eq!(host_of(b"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n"), None);
-    }
-
-    #[test]
-    fn the_healthz_path_is_read_from_the_request_line() {
-        assert_eq!(request_path(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n"), Some("/healthz"));
-        assert_eq!(request_path(b"GET /healthz?v=1 HTTP/1.1\r\n\r\n"), Some("/healthz"));
-    }
-
-    /// The router's own answer, byte for byte, over a real socket: CRLF
-    /// line endings (stormlb#5), the body its content-length says.
-    #[tokio::test]
-    async fn healthz_on_an_unclaimed_host_is_crlf_on_the_wire() {
+    async fn serve(t: Table) -> SocketAddr {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
-        tokio::spawn(serve_on(l, Front::plain(Arc::new(RwLock::new(HashMap::new())))));
+        tokio::spawn(serve_on(l, Front::plain(t)));
+        addr
+    }
+
+    async fn exchange(addr: SocketAddr, req: &[u8]) -> String {
         let mut c = TcpStream::connect(addr).await.unwrap();
-        c.write_all(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").await.unwrap();
+        c.write_all(req).await.unwrap();
         let mut got = Vec::new();
-        c.read_to_end(&mut got).await.unwrap();
-        assert_eq!(
-            String::from_utf8(got).unwrap(),
-            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 13\r\nconnection: close\r\n\r\nrouter alive\n"
-        );
+        tokio::time::timeout(Duration::from_secs(10), c.read_to_end(&mut got)).await.unwrap().unwrap();
+        String::from_utf8(got).unwrap()
+    }
+
+    /// A backend answering each request with its name and the path, on a
+    /// keep-alive connection.
+    async fn named_backend(name: &'static str) -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    loop {
+                        while let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4) {
+                            let head = String::from_utf8_lossy(&buf[..end]).into_owned();
+                            buf.drain(..end);
+                            let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                            let body = format!("{name} {path}");
+                            let resp = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{body}", body.len());
+                            if s.write_all(resp.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                        match s.read(&mut tmp).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    /// The router's own answer, over a real socket: CRLF line endings
+    /// (stormlb#5), the body its content-length says, the connection closed.
+    #[tokio::test]
+    async fn healthz_on_an_unclaimed_host_is_crlf_on_the_wire() {
+        let addr = serve(Table::default()).await;
+        let got = exchange(addr, b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").await;
+        let (head, body) = got.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{got:?}");
+        assert!(!head.replace("\r\n", "").contains('\n'), "a bare LF in {head:?}");
+        assert!(head.contains("content-type: text/plain\r\n") && head.contains("content-length: 13"), "{head:?}");
+        assert!(head.contains("connection: close"), "{head:?}");
+        assert_eq!(body, "router alive\n");
+    }
+
+    #[tokio::test]
+    async fn the_router_answers_400_404_and_names_what_is_missing() {
+        let a = named_backend("a").await;
+        let addr = serve(table(vec![json!({"metadata": {"namespace": "t", "name": "a", "annotations": {"storm.io/backend": a.to_string()}},
+            "spec": {"hostnames": ["a.test"]}})]))
+        .await;
+        assert!(exchange(addr, b"GET / HTTP/1.0\r\n\r\n").await.starts_with("HTTP/1.1 400"));
+        let r = exchange(addr, b"GET / HTTP/1.1\r\nHost: nobody.test\r\n\r\n").await;
+        assert!(r.starts_with("HTTP/1.1 404") && r.ends_with("no route for host nobody.test\n"), "{r}");
+    }
+
+    /// #26: two hosts on one keep-alive connection reach their own backends.
+    #[tokio::test]
+    async fn every_request_on_a_connection_is_routed_on_its_own() {
+        let (a, b) = (named_backend("a").await, named_backend("b").await);
+        let route = |n: &str, be: SocketAddr| {
+            json!({"metadata": {"namespace": "t", "name": n, "annotations": {"storm.io/backend": be.to_string()}},
+                "spec": {"hostnames": [format!("{n}.test")]}})
+        };
+        let addr = serve(table(vec![route("a", a), route("b", b)])).await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(b"GET /1 HTTP/1.1\r\nHost: a.test\r\n\r\nGET /2 HTTP/1.1\r\nHost: b.test\r\nConnection: close\r\n\r\n").await.unwrap();
+        let mut got = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), c.read_to_end(&mut got)).await.unwrap().unwrap();
+        let got = String::from_utf8(got).unwrap();
+        assert!(got.contains("a /1") && got.contains("b /2"), "{got}");
     }
 
     #[test]
-    fn the_request_target_keeps_the_query() {
-        assert_eq!(request_target(b"GET /a/b?c=1 HTTP/1.1\r\n\r\n"), Some("/a/b?c=1"));
-        assert_eq!(request_target(b"CONNECT x:443 HTTP/1.1\r\n\r\n"), None);
+    fn hop_by_hop_headers_are_not_forwarded() {
+        let mut h = HeaderMap::new();
+        for (k, v) in [("connection", "keep-alive, x-secret"), ("x-secret", "1"), ("keep-alive", "5"), ("te", "trailers"), ("x-app", "kept")] {
+            h.insert(HeaderName::from_static(k), HeaderValue::from_static(v));
+        }
+        strip_hop_by_hop(&mut h, false);
+        assert_eq!(h.len(), 1);
+        assert_eq!(h["x-app"], "kept");
+        let mut u = HeaderMap::new();
+        u.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+        u.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+        assert!(is_upgrade(&u));
+        strip_hop_by_hop(&mut u, true);
+        assert_eq!((u[header::CONNECTION].to_str().unwrap(), u[header::UPGRADE].to_str().unwrap()), ("upgrade", "websocket"));
     }
 
     #[test]
-    fn tls_requests_say_https_and_a_clients_claim_is_dropped() {
-        let head = b"GET / HTTP/1.1\r\nHost: a\r\nx-forwarded-proto: http\r\nAccept: */*\r\n\r\nBODY";
-        let end = find_head_end(head).unwrap();
-        let out = String::from_utf8(forwarded_https(head, end)).unwrap();
-        assert_eq!(out, "GET / HTTP/1.1\r\nX-Forwarded-Proto: https\r\nHost: a\r\nAccept: */*\r\n\r\nBODY");
+    fn the_port_is_stripped_from_the_host() {
+        assert_eq!(strip_port("console.storm1.g8.lo:80"), "console.storm1.g8.lo");
+        assert_eq!(strip_port("[::1]:80"), "::1");
+        assert_eq!(strip_port("example"), "example");
     }
 
     #[test]
     fn the_status_code_is_read_from_a_status_line() {
         assert_eq!(status_code(b"HTTP/1.1 200 OK\r\n"), Some("200"));
         assert_eq!(status_code(b"HTTP/1.0 404 Not Found"), Some("404"));
-        assert_eq!(status_code(b"HTTP/1.1 101 Switching"), Some("101"));
         assert_eq!(status_code(b"SSH-2.0-OpenSSH"), None);
         assert_eq!(status_code(b"HTTP/1.1 2"), None);
     }
 
     #[test]
     fn the_backend_protocol_and_name_come_from_annotations() {
-        let r = |a: serde_json::Value| serde_json::json!({ "metadata": { "annotations": a } });
-        let b = |a, addr: &str| with_protocol(&r(a), addr.into());
-        assert_eq!(b(serde_json::json!({}), "10.0.0.1:80").unwrap().tls, None);
-        assert_eq!(b(serde_json::json!({"storm.io/backend-protocol": "HTTP"}), "10.0.0.1:80").unwrap().tls, None);
-        let https = serde_json::json!({"storm.io/backend-protocol": "https"});
-        assert_eq!(b(https.clone(), "127.0.0.1:9096").unwrap().tls.as_deref(), Some("127.0.0.1"));
-        assert_eq!(b(https, "[::1]:9096").unwrap().tls.as_deref(), Some("::1"));
-        let named = serde_json::json!({"storm.io/backend-protocol": "https", "storm.io/backend-server-name": "cadvisor.node"});
-        assert_eq!(b(named, "127.0.0.1:9096").unwrap().tls.as_deref(), Some("cadvisor.node"));
-        assert!(b(serde_json::json!({"storm.io/backend-protocol": "h2c"}), "1.2.3.4:5").is_err());
-    }
-
-    #[test]
-    fn the_head_end_is_the_blank_line() {
-        assert_eq!(find_head_end(b"GET / HTTP/1.1\r\n\r\nbody"), Some(18));
-        assert_eq!(find_head_end(b"GET / HTTP/1.1\r\n"), None);
+        let r = |a: serde_json::Value| json!({ "metadata": { "annotations": a } });
+        assert_eq!(routes::proto_of(&r(json!({}))).unwrap(), Proto::Http);
+        assert_eq!(routes::proto_of(&r(json!({"storm.io/backend-protocol": "HTTP"}))).unwrap(), Proto::Http);
+        let https = routes::proto_of(&r(json!({"storm.io/backend-protocol": "https"}))).unwrap();
+        assert_eq!(https.server_name("127.0.0.1:9096").as_deref(), Some("127.0.0.1"));
+        assert_eq!(https.server_name("[::1]:9096").as_deref(), Some("::1"));
+        let named = routes::proto_of(&r(json!({"storm.io/backend-protocol": "https", "storm.io/backend-server-name": "cadvisor.node"}))).unwrap();
+        assert_eq!(named.server_name("127.0.0.1:9096").as_deref(), Some("cadvisor.node"));
+        assert!(routes::proto_of(&r(json!({"storm.io/backend-protocol": "h2c"}))).is_err());
     }
 }
