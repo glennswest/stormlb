@@ -379,6 +379,10 @@ deliberate commit of its own.
         "component edit stormlb --file …/tmp/stormlb-component-21-30.toml"`
         (that file also carries #30's ports). On Done: re-check export,
         `component build stormlb --no-wait`, `shipped`.
+        2026-11-20: the master ran the `--file` edit; `component export`
+        shows ca_file, [router.tls] router.crt/key, api :9109, metrics
+        :9111 (matches `parses_the_shipped_router_config`). Next: sc-build,
+        image, `shipped` with the router TLS log proof.
 - [x] #30 (P1) ports: `[api]` 9103 is sectionsystems', `[metrics]` 9104 is
       stormblock-csi's (stormcos#65); both bind the wildcard on the host
       network. Registry free 9109–9119; 9110 is stormcentral's own default.

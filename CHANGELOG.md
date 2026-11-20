@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-11-20
+- **chore:** #21: the registry now ships `[router] ca_file` and
+  `[router.tls]` (router.crt/key from stormcert-serving-router), plus #30's
+  api :9109 / metrics :9111; image requested to carry it.
 - **docs:** #33 (the router's `token_file`) waits on stormcos#395, which
   mints stormlb's ServiceAccount token; README and deck cite it. The
   router's RBAC was out of date there, so stormcos#395 now has the current
