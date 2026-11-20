@@ -29,6 +29,11 @@
 //!   refused a connection in the last [`EJECT`] (passive). A ref with no
 //!   such endpoint is left out of the weighting; if every endpoint of a ref is
 //!   only ejected, they are tried anyway.
+//! - **Other namespaces**: a `backendRef` with a `namespace` other than the
+//!   route's resolves only when that namespace holds a `ReferenceGrant`
+//!   from `HTTPRoute` in the route's namespace to `Service` (all of them, or
+//!   that one by name). Otherwise it is unresolved: `ResolvedRefs: False`,
+//!   reason `RefNotPermitted`, and its share of requests answers 500.
 //! - **`storm.io/backend: host:port`** on the route still wins over its rules:
 //!   one static backend for every path (node services, stormcos).
 //!
@@ -45,6 +50,9 @@ use serde_json::{json, Value};
 
 /// How long a connection refusal keeps an endpoint out of rotation.
 pub const EJECT: Duration = Duration::from_secs(5);
+
+/// The Gateway API's group.
+pub const GATEWAY_GROUP: &str = "gateway.networking.k8s.io";
 
 /// The controller name in an HTTPRoute's `status.parents`.
 pub const CONTROLLER: &str = "storm.io/stormlb";
@@ -498,6 +506,11 @@ pub struct Objects {
     pub endpoints: HashMap<String, Value>,
     /// Why Services could not be read (every ref is then unresolved).
     pub services_error: Option<String>,
+    /// namespace → the ReferenceGrants in it.
+    pub grants: HashMap<String, Vec<Value>>,
+    /// Why ReferenceGrants could not be read (every cross-namespace ref is
+    /// then refused).
+    pub grants_error: Option<String>,
 }
 
 impl Objects {
@@ -514,6 +527,28 @@ impl Objects {
                 self.slices.entry(format!("{ns}/{svc}")).or_default().push(s.clone());
             }
         }
+    }
+
+    pub fn index_grants(&mut self, list: &Value) {
+        for g in list["items"].as_array().into_iter().flatten() {
+            let ns = g["metadata"]["namespace"].as_str().unwrap_or("default").to_string();
+            self.grants.entry(ns).or_default().push(g.clone());
+        }
+    }
+
+    /// Whether an HTTPRoute in `from_ns` may name Service `svc` in `to_ns`.
+    pub fn granted(&self, from_ns: &str, to_ns: &str, svc: &str) -> bool {
+        self.grants.get(to_ns).into_iter().flatten().any(|g| {
+            let from = g["spec"]["from"].as_array().into_iter().flatten().any(|f| {
+                f["group"].as_str() == Some(GATEWAY_GROUP) && f["kind"].as_str() == Some("HTTPRoute") && f["namespace"].as_str() == Some(from_ns)
+            });
+            let to = g["spec"]["to"].as_array().into_iter().flatten().any(|t| {
+                t["group"].as_str().unwrap_or("").is_empty()
+                    && t["kind"].as_str() == Some("Service")
+                    && t["name"].as_str().is_none_or(|n| n.is_empty() || n == svc)
+            });
+            from && to
+        })
     }
 
     pub fn index_endpoints(&mut self, list: &Value) {
@@ -751,6 +786,14 @@ fn resolve(
     if !group.is_empty() || kind != "Service" {
         return fail(format!("InvalidKind: {group}/{kind} (only core Services)"));
     }
+    if ns != route_ns {
+        if let Some(e) = &objs.grants_error {
+            return fail(format!("RefNotPermitted: ReferenceGrants could not be read: {e}"));
+        }
+        if !objs.granted(route_ns, ns, svc) {
+            return fail(format!("RefNotPermitted: no ReferenceGrant in {ns} lets HTTPRoutes of {route_ns} reach Service {svc}"));
+        }
+    }
     if let Some(e) = &objs.services_error {
         return fail(format!("BackendNotFound: Services could not be read: {e}"));
     }
@@ -823,6 +866,18 @@ fn resolve(
     b.balance = balance;
     b.check = check;
     b
+}
+
+/// Whether a route (without `storm.io/backend`) has a backendRef in a
+/// namespace other than its own: only then are ReferenceGrants listed.
+pub fn has_cross_namespace_ref(routes: &[Value]) -> bool {
+    routes.iter().any(|r| {
+        let ns = r["metadata"]["namespace"].as_str().unwrap_or("default");
+        r["metadata"]["annotations"]["storm.io/backend"].is_null()
+            && r["spec"]["rules"].as_array().into_iter().flatten().any(|rule| {
+                rule["backendRefs"].as_array().into_iter().flatten().any(|b| b["namespace"].as_str().is_some_and(|n| n != ns))
+            })
+    })
 }
 
 /// `ip:port`, bracketing an IPv6 address.
@@ -1176,6 +1231,71 @@ mod tests {
         assert_eq!((c[0].0, c[0].1), ("Accepted", true));
         assert_eq!((c[1].0, c[1].1), ("PartiallyInvalid", true));
         assert_eq!((c[2].0, c[2].1, c[2].2.as_str()), ("ResolvedRefs", false, "BackendNotFound"));
+    }
+
+    fn cross_ns(grants: &[Value]) -> Objects {
+        let mut o = Objects::default();
+        o.routes.push(json!({"metadata": {"namespace": "a", "name": "r"}, "spec": {"hostnames": ["h"], "rules": [
+            {"backendRefs": [{"name": "s", "namespace": "b", "port": 80}]}]}}));
+        o.services.insert("b/s".into(), json!({"metadata": {"namespace": "b", "name": "s"},
+            "spec": {"clusterIP": "10.96.0.9", "ports": [{"port": 80}]}}));
+        o.index_grants(&json!({"items": grants}));
+        o
+    }
+
+    fn grant(ns: &str, from_ns: &str, to: Value) -> Value {
+        json!({"metadata": {"namespace": ns, "name": "g"}, "spec": {
+            "from": [{"group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "namespace": from_ns}], "to": [to]}})
+    }
+
+    fn resolved(o: &Objects) -> Result<Vec<String>, String> {
+        let (t, _) = build(o, &mut Known::default());
+        let b = &t.routes[0].rules[0].backends[0];
+        b.endpoints.clone().map(|e| e.iter().map(|e| e.addr.clone()).collect())
+    }
+
+    #[test]
+    fn a_reference_grant_lets_a_route_reach_another_namespace() {
+        let any = json!({"group": "", "kind": "Service"});
+        assert_eq!(resolved(&cross_ns(&[grant("b", "a", any)])).unwrap(), ["10.96.0.9:80"]);
+        let named = json!({"group": "", "kind": "Service", "name": "s"});
+        assert_eq!(resolved(&cross_ns(&[grant("b", "a", named)])).unwrap(), ["10.96.0.9:80"]);
+    }
+
+    #[test]
+    fn without_a_matching_grant_the_ref_is_not_permitted() {
+        let svc = json!({"group": "", "kind": "Service"});
+        let cases = [
+            vec![],
+            vec![grant("a", "a", svc.clone())],                                            // grant in the route's namespace
+            vec![grant("b", "c", svc.clone())],                                            // from another namespace
+            vec![grant("b", "a", json!({"group": "", "kind": "Service", "name": "other"}))], // another Service
+            vec![grant("b", "a", json!({"group": "", "kind": "Secret"}))],                  // another kind
+        ];
+        for g in cases {
+            let o = cross_ns(&g);
+            let why = resolved(&o).unwrap_err();
+            assert!(why.starts_with("RefNotPermitted: "), "{g:?}: {why}");
+            let (t, _) = build(&o, &mut Known::default());
+            let c = conditions(&t.routes[0]);
+            assert_eq!((c[1].0, c[1].1, c[1].2.as_str()), ("ResolvedRefs", false, "RefNotPermitted"));
+            assert_eq!(t.routes[0].rules[0].choose().unwrap_err().0, 500);
+        }
+        // Unreadable grants refuse too; a same-namespace ref needs none.
+        let mut o = cross_ns(&[grant("b", "a", svc)]);
+        o.grants_error = Some("403".into());
+        assert!(resolved(&o).unwrap_err().starts_with("RefNotPermitted: ReferenceGrants could not be read"));
+        o.routes[0]["spec"]["rules"][0]["backendRefs"][0]["namespace"] = json!("a");
+        o.services.insert("a/s".into(), json!({"spec": {"clusterIP": "10.96.0.8", "ports": [{"port": 80}]}}));
+        assert_eq!(resolved(&o).unwrap(), ["10.96.0.8:80"]);
+    }
+
+    #[test]
+    fn cross_namespace_refs_are_found() {
+        assert!(has_cross_namespace_ref(&cross_ns(&[]).routes));
+        let mut o = cross_ns(&[]);
+        o.routes[0]["spec"]["rules"][0]["backendRefs"][0]["namespace"] = json!("a");
+        assert!(!has_cross_namespace_ref(&o.routes));
     }
 
     #[test]

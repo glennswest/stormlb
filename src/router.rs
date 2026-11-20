@@ -1178,9 +1178,12 @@ fn upstream_connector(path: &str) -> anyhow::Result<TlsConnector> {
 
 /// Every object one table needs: the HTTPRoutes, and — when a route has a
 /// backendRef — the Services, EndpointSlices and Endpoints of every
-/// namespace (three lists a poll, however many routes). A list the
+/// namespace (three lists a poll, however many routes), and the
+/// ReferenceGrants when a ref names another namespace (#42). A list the
 /// apiserver does not serve (404) is absent; any other failure fails the
-/// refresh, so the last good table stays.
+/// refresh, so the last good table stays — except the ReferenceGrants,
+/// whose failure only refuses the cross-namespace refs (fail closed,
+/// without stopping the rest of the table from updating).
 async fn fetch_objects(client: &reqwest::Client, api: &str, token: Option<&str>) -> anyhow::Result<routes::Objects> {
     let list = api_list(client, &format!("{api}/apis/gateway.networking.k8s.io/v1/httproutes"), token)
         .await?
@@ -1203,6 +1206,29 @@ async fn fetch_objects(client: &reqwest::Client, api: &str, token: Option<&str>)
     if let Some(v) = api_list(client, &format!("{api}/api/v1/endpoints"), token).await? {
         o.index_endpoints(&v);
     }
+    if routes::has_cross_namespace_ref(&o.routes) {
+        // v1beta1 is where the Gateway API serves ReferenceGrant; v1 if only
+        // that is served. Neither: no grants, so every such ref is refused.
+        let mut got = None;
+        for v in ["v1beta1", "v1"] {
+            match api_list(client, &format!("{api}/apis/{}/{v}/referencegrants", routes::GATEWAY_GROUP), token).await {
+                Ok(Some(l)) => {
+                    got = Some(Ok(l));
+                    break;
+                }
+                Ok(None) => continue,
+                Err(e) => {
+                    got = Some(Err(e));
+                    break;
+                }
+            }
+        }
+        match got {
+            Some(Ok(l)) => o.index_grants(&l),
+            Some(Err(e)) => o.grants_error = Some(e.to_string()),
+            None => {}
+        }
+    }
     Ok(o)
 }
 
@@ -1221,7 +1247,7 @@ async fn api_list(client: &reqwest::Client, url: &str, token: Option<&str>) -> a
         let who = if token.is_some() { "the router's token (token_file)" } else { "anonymous (no [router] token_file)" };
         anyhow::bail!(
             "{status} for {url}: {who} may not read it — the router needs list on httproutes, services, \
-             endpoints and endpointslices, and patch on httproutes/status (stormlb#9, #37)"
+             endpoints, endpointslices and referencegrants, and patch on httproutes/status (stormlb#9, #37, #42)"
         );
     }
     Ok(Some(resp.error_for_status()?.json().await?))

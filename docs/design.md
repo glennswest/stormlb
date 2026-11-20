@@ -177,8 +177,15 @@ Choices that follow from the code (`src/router.rs`):
 - **`auto` listen.** It binds the node's routable address and loopback, not
   the wildcard, because stormimds holds `169.254.169.254:80`.
 
-Deliberately not done (yet): ReferenceGrants for cross-namespace refs
-(#42), HTTPRoute filters (header modifiers, redirects, rewrites, mirrors),
+**Cross-namespace refs need a ReferenceGrant (#42).** A route in one
+namespace may name a Service in another only when the target namespace's
+owner says so with a ReferenceGrant (from HTTPRoute in the route's
+namespace, to Service). Without one the ref is `RefNotPermitted` and its
+share answers 500. Grants are listed only when such a ref exists; when they
+cannot be read the refs are refused (fail closed) and the rest of the table
+still updates.
+
+Deliberately not done (yet): HTTPRoute filters (header modifiers, redirects, rewrites, mirrors),
 RegularExpression matches, session persistence, and HTTP/2.
 
 **Metrics follow the requests (#12, #37).** Every request is counted by

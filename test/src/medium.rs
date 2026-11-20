@@ -15,7 +15,8 @@
 //! - the table: a route update moves the host, a backendRef resolves to its
 //!   Service's endpoints, rules route by longest path prefix and split by
 //!   weight (#37), the route's status says Accepted / ResolvedRefs /
-//!   BackendsHealthy, fifty routes at once each reach their own backend
+//!   BackendsHealthy, a backendRef into another namespace with no
+//!   ReferenceGrant is refused (a 500 and `RefNotPermitted`, #42), fifty routes at once each reach their own backend
 //!   under concurrent load, and deleted routes are 404s again;
 //! - and stormd saw no restart or crash of the router throughout.
 //!
@@ -87,6 +88,7 @@ pub async fn run(env: &Env, r: &mut Report) {
     } else {
         r.record("route-status", Outcome::Fail("not run: rules-and-weights did not pass".into()), 0, None);
     }
+    r.run("cross-namespace-refused", cx.cross_namespace()).await;
     r.run("endpoint-failover", cx.failover()).await;
     if r.run("many-hosts", cx.many_hosts()).await {
         r.run("concurrent-connections", cx.concurrent()).await;
@@ -570,6 +572,68 @@ impl<'a> Ctx<'a> {
         } else {
             Outcome::Fail(format!("/ x40 split a={a} b={b}, want about 30:10 (weights 3:1)"))
         }
+    }
+
+    /// A backendRef to a Service in another namespace, with no ReferenceGrant
+    /// there for it (the test makes none: its Role is namespaced), is not
+    /// followed (#42): its requests answer 500 and the route's status says
+    /// `ResolvedRefs: False`, reason `RefNotPermitted`. The refusal comes
+    /// before the Service is looked up, so the target need not exist.
+    async fn cross_namespace(&self) -> Outcome {
+        let other = if self.api.ns == "kube-system" { "default" } else { "kube-system" };
+        let host = self.env.host("xns");
+        let rules = json!([{"backendRefs": [{"name": "kubernetes", "namespace": other, "port": 443}]}]);
+        if let Err(e) = self.rules_route("xns", &host, rules).await {
+            return Outcome::Infra(e);
+        }
+        let t = Instant::now();
+        let mut last = String::new();
+        let mut answered = None;
+        while t.elapsed() < self.env.route_wait {
+            match fetch(&self.env.router, &host, "/").await {
+                Ok(Some(r)) if r.status == 500 && r.text().contains("RefNotPermitted") => {
+                    answered = Some(t.elapsed());
+                    break;
+                }
+                Ok(Some(r)) => last = format!("{} {:?}", r.status, r.text().trim()),
+                Ok(None) => last = "closed with no response".into(),
+                Err(e) => last = e.to_string(),
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let Some(after) = answered else {
+            return Outcome::Fail(format!("{host} -> {other}/kubernetes never answered 500 RefNotPermitted; last: {last}"));
+        };
+        let path = format!("{}/xns", self.api.routes());
+        let mut seen = Value::Null;
+        while t.elapsed() < self.env.route_wait * 2 {
+            match self.api.get(&path).await {
+                Ok(Some(r)) => {
+                    let refs = r["status"]["parents"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|p| p["controllerName"].as_str() == Some("storm.io/stormlb"))
+                        .flat_map(|p| p["conditions"].as_array().cloned().unwrap_or_default())
+                        .find(|c| c["type"] == "ResolvedRefs");
+                    if let Some(c) = refs {
+                        if c["status"] == "False" && c["reason"] == "RefNotPermitted" {
+                            return Outcome::Pass(format!(
+                                "{host} -> {other}/kubernetes: 500 after {} ms, ResolvedRefs False RefNotPermitted",
+                                after.as_millis()
+                            ));
+                        }
+                        seen = c;
+                    }
+                }
+                Ok(None) => return Outcome::Fail(format!("{path} is gone")),
+                Err(e) => return Outcome::Infra(e),
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        Outcome::Fail(format!(
+            "answered 500, but no ResolvedRefs False RefNotPermitted in the status (rustkube#348 leaves none); last: {seen}"
+        ))
     }
 
     /// An endpoint that refuses connections costs no request: the router

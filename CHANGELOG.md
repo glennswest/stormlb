@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### 2026-11-20
+- **fix:** the router follows a cross-namespace HTTPRoute backendRef only
+  when the target namespace holds a ReferenceGrant from HTTPRoute in the
+  route's namespace to that Service (or every Service) (#42). Otherwise
+  the ref is unresolved: `ResolvedRefs: False`, reason `RefNotPermitted`,
+  its share answers 500. ReferenceGrants (`v1beta1`, else `v1`) are listed
+  only when such a ref exists; a 404 means none, and any other failure
+  refuses those refs while the rest of the table still updates. rustkube
+  serves none yet (filed rustkube#351). Unit tests; test crate medium check
+  `cross-namespace-refused`. README, design.md, deck.
+
 ### 2026-11-19
 - **feat:** the router takes its backend config from HTTPRoutes (#37), and
   routes **every request** on its own (#26). It is now an HTTP/1.1 proxy

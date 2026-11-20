@@ -111,7 +111,8 @@ Unit-tested; `tests/balancer.rs` drives round-robin and failover through the rea
 | VRRP over IPv6 (ff02::12, link-local source, unsolicited NA) | **done** (#39) |
 | 4-octet ASNs, MP-BGP IPv6 | **done** (#40) |
 | Rules, weights, live endpoints, health, status (#37) | **done**; LoadBalancer Services are flowsdn's (flowsdn#475) |
-| ReferenceGrant for cross-namespace refs; filters, regex matches | not done (#42) |
+| ReferenceGrant for cross-namespace refs | **done** (#42); rustkube serves none yet (rustkube#351), so such refs are refused there |
+| HTTPRoute filters, regex matches | not done |
 | Sub-second VRRP failover (config takes whole seconds) | not possible today |
 
 ---

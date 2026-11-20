@@ -72,10 +72,10 @@ TOML. Unknown keys are ignored. A fuller example is in
 | Key | Default | Meaning |
 |---|---|---|
 | `listen` | `"0.0.0.0:80"` | Address to listen on. `"auto:<port>"` binds this node's routable IPv4 and `127.0.0.1` on `<port>`; see below. |
-| `apiserver` | `"https://127.0.0.1:6443"` | Where HTTPRoutes, Services, Endpoints and EndpointSlices are read from, and route status is written. |
+| `apiserver` | `"https://127.0.0.1:6443"` | Where HTTPRoutes, Services, Endpoints, EndpointSlices and ReferenceGrants are read from, and route status is written. |
 | `poll_secs` | `5` (min 1) | Seconds between route-table refreshes. |
 | `backend_ca_file` | none | The CA (PEM) a route's backend must chain to when the route says `storm.io/backend-protocol: https`; on a node, the cluster CA `/data/stormcert/ca.crt`. Only these certificates are trusted, not the public roots. Re-read on the route poll when it changes, so it may appear after the router starts. Unset or not loadable: https backends' connections fail closed. |
-| `token_file` | none | The router's identity (#9): a file holding a bearer token, its ServiceAccount's, which stormcos mints (stormcos#76 step 2) with list on HTTPRoutes, Services, Endpoints and EndpointSlices and patch on `httproutes/status` (#37). It's sent as `Authorization: Bearer` and re-read on every poll, so it can be rotated in place. Set but missing or empty: no refresh is made, and the last table keeps serving. Unset: anonymous, as before. |
+| `token_file` | none | The router's identity (#9): a file holding a bearer token, its ServiceAccount's, which stormcos mints (stormcos#76 step 2) with list on HTTPRoutes, Services, Endpoints, EndpointSlices and ReferenceGrants and patch on `httproutes/status` (#37). It's sent as `Authorization: Bearer` and re-read on every poll, so it can be rotated in place. Set but missing or empty: no refresh is made, and the last table keeps serving. Unset: anonymous, as before. |
 | `ca_file` | none | The CA (PEM) the apiserver's certificate must chain to, on a node `/data/stormcert/ca.crt` (#10). Only it is trusted, not public roots. Re-read when it changes, so it may appear after the router starts. When set, `insecure` is ignored. |
 | `insecure` | `true` | Without `ca_file`: accept the apiserver's certificate unverified. `false` without `ca_file` trusts only the public roots compiled in, which refuses stormcert's certificate. |
 
@@ -185,11 +185,16 @@ that the rule's weights pick.
 - **The table** is built every `poll_secs` (10 s timeout) from cluster-wide
   lists: `GET {apiserver}/apis/gateway.networking.k8s.io/v1/httproutes`,
   and only when some route has a `backendRef`, `/api/v1/services`,
-  `/apis/discovery.k8s.io/v1/endpointslices` and `/api/v1/endpoints`. That
-  is four requests a poll, however many routes. A list the apiserver does not
-  serve (404) is treated as empty. Any other failure keeps the last good
-  table, logged once per distinct error; a 401/403 names the verbs the
-  router needs (list on those four, patch on `httproutes/status`).
+  `/apis/discovery.k8s.io/v1/endpointslices` and `/api/v1/endpoints`, and
+  only when some backendRef names another namespace,
+  `/apis/gateway.networking.k8s.io/v1beta1/referencegrants` (`v1` if only
+  that is served). That is four or five requests a poll, however many
+  routes. A list the apiserver does not serve (404) is treated as empty. Any
+  other failure keeps the last good table, logged once per distinct error;
+  a 401/403 names the verbs the router needs (list on those five, patch on
+  `httproutes/status`). The ReferenceGrants are the exception: when they
+  cannot be read, the table still updates and every cross-namespace ref is
+  refused.
   - With `token_file` the router reads as its own ServiceAccount (#9).
     Without it, it reads anonymously, which works only where anonymous may
     list, i.e. the stormcos `sno` and `bastion` apiservers with
@@ -225,8 +230,16 @@ that the rule's weights pick.
   round-robin (3:1 is exactly a, a, b, a; a refresh restarts the
   rotation). Inside a ref, the router uses round-robin, or the endpoint with
   the fewest requests waiting for a response head when the Service says
-  `storm.io/balance: least-conn`. A cross-namespace ref is followed without
-  a ReferenceGrant (#42).
+  `storm.io/balance: least-conn`.
+- **Other namespaces** (#42): a backendRef whose `namespace` is not the
+  route's is followed only when that namespace holds a Gateway API
+  `ReferenceGrant` whose `from` has `group: gateway.networking.k8s.io`,
+  `kind: HTTPRoute` and the route's namespace, and whose `to` has
+  `group: ""`, `kind: Service` and either no `name` or the Service's.
+  Otherwise the ref is unresolved: `ResolvedRefs: False`, reason
+  `RefNotPermitted`, and its share of the rule's requests answers 500.
+  rustkube serves no ReferenceGrants today ([rustkube#351](https://github.com/glennswest/rustkube/issues/351)), so there every
+  cross-namespace ref is refused.
 - **Health**: an endpoint takes requests while all three hold:
   - it is ready: EndpointSlice `conditions.ready`, or Endpoints `addresses`
     as opposed to `notReadyAddresses`;
@@ -728,7 +741,7 @@ makes the Job.
 | Suite | Budget | What it proves |
 |---|---|---|
 | `short` | < 2 min | `/healthz` answers; stormd (`:180/metrics`) reports stormlb running; an HTTPRoute's hostname reaches its backend, and is a 404 again once deleted. |
-| `medium` | < 30 min | 400 without a Host, the 404 that names the host, `/healthz` on unclaimed and claimed hosts and its CRLF line endings, Host case and port, per-request routing on one connection, a streamed response not held back, an Upgrade as a two-way pipe, an 8 MiB body, the 16 KiB head limit (431), a dead backend's 502, a route update, a backendRef to its Service's endpoints, a headless Service with no endpoints a 503, rules by longest prefix with a 3:1 weight split, the route's status conditions, failover past an endpoint that refuses connections, 50 hosts under concurrent load, deleted routes back to 404, no restart or crash under stormd. The VIP half is reported skip: it is not shipped. |
+| `medium` | < 30 min | 400 without a Host, the 404 that names the host, `/healthz` on unclaimed and claimed hosts and its CRLF line endings, Host case and port, per-request routing on one connection, a streamed response not held back, an Upgrade as a two-way pipe, an 8 MiB body, the 16 KiB head limit (431), a dead backend's 502, a route update, a backendRef to its Service's endpoints, a headless Service with no endpoints a 503, rules by longest prefix with a 3:1 weight split, the route's status conditions, a cross-namespace backendRef with no ReferenceGrant refused (500, `RefNotPermitted`), failover past an endpoint that refuses connections, 50 hosts under concurrent load, deleted routes back to 404, no restart or crash under stormd. The VIP half is reported skip: it is not shipped. |
 | `long` | the night window | Waves sized from the node's allocatable CPU (read from the API) and the container's open-file limit. Each wave creates routes, holds connections at that size, drains, and checks residue. Each `wave-<n>` line carries route-programming time, request p50/p99, requests/s, drain time, leftovers, restarts and idle latency. `trend` fails on the first wave that is slower than the first wave of its size. |
 
 - **Backends** are listeners in the test pod. They are reached on the node's
@@ -773,8 +786,6 @@ What the code does not do yet, which older docs implied it did:
   runs on nodes.
 - The API is plain HTTP on loopback, with an optional bearer token: no TLS
   (stormcos#81 allows nothing else off-node, which is why it is loopback).
-- [#42](https://github.com/glennswest/stormlb/issues/42): a cross-namespace
-  backendRef is followed without a ReferenceGrant.
 - [rustkube#347](https://github.com/glennswest/rustkube/issues/347): rustkube
   writes every Running pod as ready in its EndpointSlices and Endpoints, and a
   named `targetPort` as the Service port. Until it is fixed, readiness does not
