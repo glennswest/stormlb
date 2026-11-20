@@ -412,6 +412,10 @@ deliberate commit of its own.
   - [x] 2026-11-13: export lacked apis; parked with `wait-owner --action`.
         2026-11-19: the master ran the `--set apis=…`; `component export`
         shows router/vips/metrics as declared. Image requested, #32 closed.
+        Image build ff8657d8133b at 3ff6f62. The `metrics` probe (:9111)
+        fails until #30's registry edit lands: config still sets metrics
+        auto:9104. Re-sent the master the `--file …21-30.toml` (2026-11-19;
+        only config differs from the export).
 - [x] Docs refresh (2026-11-14, since 2026-11-07). Code changed only in
       e8dee08 (ports, already documented). Fixed: VIP port 7443 / stormcluster
       is the client (#28 text), gap #34 (stormfn 9109) listed. #28 can close
