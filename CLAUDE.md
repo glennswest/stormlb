@@ -548,3 +548,7 @@ deliberate commit of its own.
       Then: `stormcentral note` the master the registry edit (`token_file =
       "/data/stormcert/stormlb.token"` or wherever #395 puts it), image,
       check on a node with anonymous admin off, close.
+- [ ] #43 (P1) review d38338ff7fe3: `auto` bind took whichever address
+      bound (loopback alone = healthy but unreachable). `bind_all`: every
+      address or fail naming it; unit tests (partial bind, auto with a held
+      port); README, design.md, CHANGELOG. Then sc-build, image, close.

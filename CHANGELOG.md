@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-11-20
+- **fix:** `auto:<port>` listeners (router, router TLS, metrics) must bind
+  both the node address and loopback; a partial bind now fails naming the
+  address that would not bind, instead of leaving a router that passes its
+  loopback health probe while unreachable from off the node (#43, review
+  finding d38338ff7fe3).
 - **chore:** #21: the registry now ships `[router] ca_file` and
   `[router.tls]` (router.crt/key from stormcert-serving-router), plus #30's
   api :9109 / metrics :9111; image requested to carry it.

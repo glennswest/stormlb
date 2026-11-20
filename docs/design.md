@@ -175,7 +175,9 @@ Choices that follow from the code (`src/router.rs`):
   `127.0.0.1:<port>` on every node, so cluster manifests carry no node
   addresses.
 - **`auto` listen.** It binds the node's routable address and loopback, not
-  the wildcard, because stormimds holds `169.254.169.254:80`.
+  the wildcard, because stormimds holds `169.254.169.254:80`. Both must bind
+  or the bind fails, naming the address (#43): a router bound on loopback
+  alone passes its health probe and serves nobody.
 
 **Cross-namespace refs need a ReferenceGrant (#42).** A route in one
 namespace may name a Service in another only when the target namespace's

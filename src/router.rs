@@ -255,23 +255,7 @@ pub(crate) async fn bind_listeners(listen: &str) -> anyhow::Result<Vec<TcpListen
     // everything. Resolved here rather than configured, because the address
     // is not known when the golden is built.
     match bind_addrs(listen) {
-        Some(addrs) => {
-            // A router on its routable address and not on loopback passes no
-            // health check, and one on loopback alone serves nobody — it
-            // needs both.
-            let mut listeners = Vec::new();
-            let mut last = None;
-            for a in &addrs {
-                match TcpListener::bind(a).await {
-                    Ok(l) => listeners.push(l),
-                    Err(e) => last = Some(e),
-                }
-            }
-            if listeners.is_empty() {
-                return Err(last.expect("at least one address was tried").into());
-            }
-            Ok(listeners)
-        }
+        Some(addrs) => bind_all(&addrs).await,
         // `auto` that could not be resolved falls back to the wildcard, not
         // to the literal string. Binding "auto:80" is a DNS lookup of a word,
         // and the error names resolution rather than the placeholder.
@@ -285,6 +269,25 @@ pub(crate) async fn bind_listeners(listen: &str) -> anyhow::Result<Vec<TcpListen
         }
         None => Ok(vec![TcpListener::bind(listen).await?]),
     }
+}
+
+/// Bind every one of `addrs`, or fail naming the one that would not bind.
+///
+/// A router on its routable address and not on loopback passes no health
+/// check, and one on loopback alone serves nobody — it needs both. Taking
+/// whichever bound (as this did) left a router whose loopback probe passed
+/// while nothing off the node could reach it: a port collision on the node
+/// address hidden for good (review finding d38338ff7fe3, #43). So a partial
+/// bind is a failure, and the listeners that did bind are dropped with it.
+async fn bind_all(addrs: &[String]) -> anyhow::Result<Vec<TcpListener>> {
+    let mut listeners = Vec::new();
+    for a in addrs {
+        match TcpListener::bind(a).await {
+            Ok(l) => listeners.push(l),
+            Err(e) => anyhow::bail!("bind {a}: {e} (auto binds {} and needs every one)", addrs.join(" and ")),
+        }
+    }
+    Ok(listeners)
 }
 
 /// What a listener serves: the routes, and on plain HTTP, whether to send
@@ -1284,6 +1287,37 @@ mod tests {
         let addr = l.local_addr().unwrap();
         tokio::spawn(serve_on(l, Front::plain(t)));
         addr
+    }
+
+    /// #43 (d38338ff7fe3): one address of an `auto` set held by someone
+    /// else fails the whole bind, naming that address, and the address that
+    /// did bind is released rather than served alone.
+    #[tokio::test]
+    async fn a_partial_bind_fails_and_names_the_address() {
+        let held = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let taken = held.local_addr().unwrap().to_string();
+        let free = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().to_string();
+        let err = bind_all(&[free.clone(), taken.clone()]).await.unwrap_err().to_string();
+        assert!(err.contains(&format!("bind {taken}")), "{err}");
+        // The one that bound first was dropped with the failure.
+        TcpListener::bind(&free).await.expect("the free address was released");
+        // Every address binding is still a success.
+        let ls = bind_all(&[free.clone()]).await.unwrap();
+        assert_eq!(ls.len(), 1);
+    }
+
+    /// `auto:<port>` with the port held on loopback (or on the node address,
+    /// whichever this machine resolves) does not start a half-bound router.
+    #[tokio::test]
+    async fn auto_with_a_held_port_fails() {
+        let held = match bind_addrs("auto:0") {
+            Some(a) => a[0].rsplit_once(':').unwrap().0.to_string(),
+            None => "127.0.0.1".into(),
+        };
+        let l = std::net::TcpListener::bind(format!("{held}:0")).unwrap();
+        let port = l.local_addr().unwrap().port();
+        let got = bind_listeners(&format!("auto:{port}")).await;
+        assert!(got.is_err(), "auto:{port} bound with {held}:{port} held");
     }
 
     async fn exchange(addr: SocketAddr, req: &[u8]) -> String {

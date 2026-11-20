@@ -84,7 +84,12 @@ connected UDP socket to `203.0.113.1`, so nothing is sent). It binds that
 address plus loopback, and skips anything in `127.*` or `169.254.*`. It
 exists because `0.0.0.0:80` includes `169.254.169.254:80`, which stormimds
 (the metadata service) holds. Whichever started second crash-looped on
-`EADDRINUSE`. If no address can be found it warns and falls back to
+`EADDRINUSE`. Both addresses must bind: if either fails (a port collision
+on the node address, say) the bind fails naming that address, rather than
+a router whose loopback health probe passes while nothing off the node can
+reach it (#43). For `[router] listen` that ends the router (stormd restarts
+it, so the restart count shows it); `[router.tls]` and `[metrics]` log it
+and bind nothing. If no address can be found it warns and falls back to
 `0.0.0.0:<port>`.
 
 ### `[router.tls]`: TLS for routed hosts (present = enabled)
