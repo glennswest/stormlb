@@ -288,8 +288,8 @@ that the rule's weights pick.
   - Bodies stream both ways.
   - An `Upgrade` request (websockets) gets the backend's `101`, and then the
     two connections are spliced.
-  - Backend connections are kept alive and reused, up to 32 idle per
-    endpoint.
+  - Backend connections are kept alive and reused: up to 8 idle per
+    endpoint and 64 in all, each for 15 s.
   - A backend response with `connection: close` closes the client's
     connection after it.
   - The request head limit is 16 KiB and 256 headers (beyond that: `431`,

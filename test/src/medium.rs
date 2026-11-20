@@ -680,7 +680,9 @@ impl<'a> Ctx<'a> {
 
     async fn concurrent(&self) -> Outcome {
         let want = self.many.lock().unwrap().clone();
-        let n = fd_limit().map(|l| (l.saturating_sub(64) / 3) as usize).unwrap_or(200).clamp(8, 200);
+        // Up to four descriptors a request where the router shares this
+        // process (the harness), plus its idle backend connections.
+        let n = fd_limit().map(|l| (l.saturating_sub(192) / 5) as usize).unwrap_or(200).clamp(8, 200);
         let mut set = JoinSet::new();
         for i in 0..n {
             let (h, be) = want[i % want.len()].clone();

@@ -164,8 +164,11 @@ const MAX_HEAD: usize = 16 * 1024;
 const CONNECT: Duration = Duration::from_secs(5);
 /// Endpoints one request may try when connections fail.
 const TRIES: usize = 3;
-/// Idle backend connections kept per endpoint.
-const IDLE_PER_ENDPOINT: usize = 32;
+/// Idle backend connections kept per endpoint, and in all.
+const IDLE_PER_ENDPOINT: usize = 8;
+const IDLE_TOTAL: usize = 64;
+/// How long an idle backend connection is kept.
+const IDLE_FOR: Duration = Duration::from_secs(15);
 /// After a refused status write, how long before that route is tried again.
 const STATUS_BACKOFF: Duration = Duration::from_secs(60);
 
@@ -198,6 +201,7 @@ pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
     let upstream: Upstream = Arc::default();
     tokio::spawn(poll_routes(cfg.clone(), table.clone(), upstream.clone()));
     let pool = Arc::new(Pool::default());
+    tokio::spawn(Pool::reap(Arc::downgrade(&pool)));
 
     let mut redirect = None;
     if let Some(t) = &cfg.tls {
@@ -313,7 +317,8 @@ async fn serve_tls_on(listener: TcpListener, front: Front, acceptor: TlsAcceptor
         let (conn, peer) = match listener.accept().await {
             Ok(x) => x,
             Err(e) => {
-                warn!("router TLS accept: {e}");
+                tracing::debug!("router TLS accept: {e}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
                 continue;
             }
         };
@@ -343,8 +348,23 @@ async fn serve_tls_on(listener: TcpListener, front: Front, acceptor: TlsAcceptor
 /// which clients reach, and loopback, which the health probe dials. One
 /// routing table, several front doors.
 async fn serve_on(listener: TcpListener, front: Front) -> anyhow::Result<()> {
+    let mut said = None::<String>;
     loop {
-        let (conn, peer) = listener.accept().await?;
+        // An accept error (out of descriptors, mostly) is not the router's
+        // end: say it once, pause, and accept again.
+        let (conn, peer) = match listener.accept().await {
+            Ok(x) => x,
+            Err(e) => {
+                let msg = e.to_string();
+                if said.as_deref() != Some(msg.as_str()) {
+                    warn!("router accept: {msg}");
+                    said = Some(msg);
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+        said = None;
         let front = front.clone();
         tokio::spawn(async move {
             metrics().inc("stormlb_router_connections_total", &[("listener", "http")]);
@@ -834,37 +854,54 @@ where
     Ok(s)
 }
 
-/// Idle backend connections, by endpoint (and TLS name).
+/// Idle backend connections, by endpoint (and TLS name), with when each
+/// went idle. At most [`IDLE_PER_ENDPOINT`] per endpoint and [`IDLE_TOTAL`]
+/// in all, each for [`IDLE_FOR`]: past that the connection is closed.
 #[derive(Default)]
 struct Pool {
-    idle: std::sync::Mutex<HashMap<String, Vec<client_http1::SendRequest<Body>>>>,
+    idle: std::sync::Mutex<HashMap<String, Vec<(Instant, client_http1::SendRequest<Body>)>>>,
 }
 
 impl Pool {
     fn take(&self, key: &str) -> Option<client_http1::SendRequest<Body>> {
         let mut m = self.idle.lock().unwrap();
         let v = m.get_mut(key)?;
-        while let Some(s) = v.pop() {
-            if !s.is_closed() {
+        while let Some((at, s)) = v.pop() {
+            if !s.is_closed() && at.elapsed() < IDLE_FOR {
                 return Some(s);
             }
         }
         None
     }
 
-    /// Keep the connection once its response is done (if it stays open).
+    /// Keep the connection once its response is done (if it stays open and
+    /// there is room).
     fn keep(self: &Arc<Self>, key: String, mut s: client_http1::SendRequest<Body>) {
         let pool = self.clone();
         tokio::spawn(async move {
             if s.ready().await.is_ok() {
                 let mut m = pool.idle.lock().unwrap();
+                let total: usize = m.values().map(Vec::len).sum();
                 let v = m.entry(key).or_default();
-                v.retain(|s| !s.is_closed());
-                if v.len() < IDLE_PER_ENDPOINT {
-                    v.push(s);
+                v.retain(|(at, s)| !s.is_closed() && at.elapsed() < IDLE_FOR);
+                if v.len() < IDLE_PER_ENDPOINT && total < IDLE_TOTAL {
+                    v.push((Instant::now(), s));
                 }
             }
         });
+    }
+
+    /// Close expired idle connections every few seconds, while the pool lives.
+    async fn reap(pool: std::sync::Weak<Pool>) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let Some(p) = pool.upgrade() else { return };
+            let mut m = p.idle.lock().unwrap();
+            for v in m.values_mut() {
+                v.retain(|(at, s)| !s.is_closed() && at.elapsed() < IDLE_FOR);
+            }
+            m.retain(|_, v| !v.is_empty());
+        }
     }
 }
 
