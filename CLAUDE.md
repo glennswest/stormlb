@@ -548,9 +548,13 @@ deliberate commit of its own.
       must ship with >= that apiserver image.
   - [x] Shipped-config test, identity logged once on the first refresh,
         README/design/deck, CHANGELOG.
-  - [ ] Registry: `stormcentral note` the master `component edit stormlb
-        --file tmp/stormlb-component-33.toml` (export + token_file only).
-  - [ ] sc-build; once export shows token_file: image, `ships-with
+  - [x] Registry: `stormcentral note` the master `component edit stormlb
+        --file tmp/stormlb-component-33.toml` (export + token_file only),
+        and the ships-with below. Sent 2026-11-21; parked with wait-owner
+        --action.
+  - [x] sc-build passed at 4769877 on a build VM: release build, 72 unit
+        + every integration test, clippy and cargo doc -D warnings.
+  - [ ] Once export shows token_file: image, `ships-with
         rustkube-apiserver@>=golden-rustkube-apiserver-e42b0c1addb5`,
         `shipped` with proof `log:route table read with the router's token`.
 - [x] #44 (P1) review: 96715e147614 (state file: one `changes` lock over
