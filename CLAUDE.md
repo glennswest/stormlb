@@ -548,12 +548,18 @@ deliberate commit of its own.
       Then: `stormcentral note` the master the registry edit (`token_file =
       "/data/stormcert/stormlb.token"` or wherever #395 puts it), image,
       check on a node with anonymous admin off, close.
-- [ ] #44 (P1) review: 96715e147614 (state file: one `changes` lock over
+- [x] #44 (P1) review: 96715e147614 (state file: one `changes` lock over
       mutate + save, unique temp per write) and cb0db54fdbcc (VRRP thread
       handles kept per address; a successor joins the stopped ones before
       it runs; stop_all joins). Tests: unit (hand-off order, concurrent
       writes), tests/vips.rs concurrent changes, vrrp-netns check 7 (negative
       control at 3c1a15a, before the fix). Then sc-build, image, close.
+  - Done in 4d67877 (fix), f790a17 (clippy, #47). The negative control
+    never got a build slot (queue ~200 deep) and was dropped. sc-build
+    passed at f790a17: release build, 72 unit + every integration test,
+    clippy and cargo doc -D warnings, tests/vips.rs 3 more runs, vrrp-netns
+    3 runs (7 IPv4 + 7 IPv6 checks each), test crate 12 + 3. #47 closed by
+    sc-build; image requested, #44 closed.
 - [ ] #43 (P1) review d38338ff7fe3: `auto` bind took whichever address
       bound (loopback alone = healthy but unreachable). `bind_all`: every
       address or fail naming it; unit tests (partial bind, auto with a held
