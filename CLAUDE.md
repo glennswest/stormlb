@@ -592,3 +592,6 @@ deliberate commit of its own.
       10 s) again; README already lists it; tmp/stormlb-component-33.toml
       (#33's pending edit) carries all three, so it can't drop it again.
       CHANGELOG only; sc-build, image, close.
+  - Done in edb494b. sc-build passed there (job 940f266536, build VM):
+    cargo build --locked + cargo test --locked, every test. Image
+    requested, #46 closed.
