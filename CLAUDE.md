@@ -586,3 +586,9 @@ deliberate commit of its own.
     took its own VIP in ~3.2 s and A stayed Master). Claim failure is
     unit-tested only (no way to make a netlink claim fail in the netns).
     #45 closed, image requested.
+- [x] #46 (P?) registry `apis` lost `metrics` in the 2026-11-20 22:09Z
+      `--file` edit (built from a pre-#32 export). 2026-11-21: `component
+      export` already shows router, vips, metrics (:9111, 100/1000 ms,
+      10 s) again; README already lists it; tmp/stormlb-component-33.toml
+      (#33's pending edit) carries all three, so it can't drop it again.
+      CHANGELOG only; sc-build, image, close.

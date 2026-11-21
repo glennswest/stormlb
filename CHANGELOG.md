@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### 2026-11-21 (#46)
+- **chore:** registry `apis` declares `metrics`
+  (`http://127.0.0.1:9111/metrics`, 100/1000 ms, 10 s) again. The
+  2026-11-20 22:09Z `component edit --file` was built from an export older
+  than #32 and dropped it; the master re-added it, and `component export`
+  shows router, vips and metrics. No code change: README's health table
+  already lists it, and the pending #33 edit file
+  (`tmp/stormlb-component-33.toml`) carries all three.
+
 ### 2026-11-21 (#45)
 - **fix:** VRRP drops an advertisement whose address list is not exactly
   its VIP (count 1, that address, no trailing bytes). Another virtual
