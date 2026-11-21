@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### 2026-11-21 (#45)
+- **fix:** VRRP drops an advertisement whose address list is not exactly
+  its VIP (count 1, that address, no trailing bytes). Another virtual
+  router on the link that reuses the VRID for another address no longer
+  resets a Backup's master-down timer or demotes a Master (review finding
+  b6881d492a82).
+- **fix:** a VRRP claim that fails (owner at start, or a takeover) puts the
+  instance back to Backup instead of leaving it advertising Master for an
+  address it does not hold. The partial claim is released, a warning counts
+  the failures, and it retries after the master-down interval, doubling to
+  at most 30 s (review finding c765c475fce3).
+- **test:** unit tests for both findings (a foreign VIP, two addresses,
+  none, trailing bytes, IPv6; a failing controller's claim → Backup, the
+  backoff and its cap). `tests/vrrp-netns.sh` check 8: B advertises another
+  VIP on vrid 51 at priority 200 while A (100) holds ours, and A stays Master.
+
 ### 2026-11-21
 - **chore:** #33: the shipped config sets `[router] token_file =
   "/data/stormcert/stormlb.token"`, the `storm-lb/stormlb` ServiceAccount

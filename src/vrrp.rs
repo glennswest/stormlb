@@ -165,6 +165,16 @@ impl VirtualRouter {
         false
     }
 
+    /// Claiming the VIP failed right after becoming Master (at start or on
+    /// takeover): the transition did not happen. Back to Backup, so no
+    /// Master advertisement goes out for an address this node does not hold
+    /// and the peers' timers still run out (review finding c765c475fce3).
+    pub fn on_claim_failed(&mut self) {
+        if self.state == State::Master {
+            self.state = State::Backup;
+        }
+    }
+
     /// Backend health, checked every turn. Returns true if a Master must
     /// resign now (send priority 0, release, become Backup).
     pub fn on_health(&mut self, healthy: bool) -> bool {
@@ -284,9 +294,11 @@ pub struct Advert {
 }
 
 /// Parse a received datagram (IP header + VRRP payload, as delivered by a raw
-/// IPPROTO_VRRP socket) if it is a valid v3 advertisement for `our_vrid`:
-/// IP TTL 255 (it was not routed, §5.1.1.3) and a correct checksum.
-pub fn parse_advertisement(datagram: &[u8], our_vrid: u8) -> Option<Advert> {
+/// IPPROTO_VRRP socket) if it is a valid v3 advertisement for `our_vrid`
+/// and `our_vip`: IP TTL 255 (it was not routed, §5.1.1.3), a correct
+/// checksum, and an address list of exactly `our_vip` (see
+/// [`parse_advertisement_v6`]).
+pub fn parse_advertisement(datagram: &[u8], our_vrid: u8, our_vip: IpAddr) -> Option<Advert> {
     if datagram.len() < 20 {
         return None;
     }
@@ -295,7 +307,7 @@ pub fn parse_advertisement(datagram: &[u8], our_vrid: u8) -> Option<Advert> {
         return None;
     }
     let src = IpAddr::V4(Ipv4Addr::new(datagram[12], datagram[13], datagram[14], datagram[15]));
-    parse_payload(&datagram[ihl..], src, our_vrid)
+    parse_payload(&datagram[ihl..], src, our_vrid, our_vip)
 }
 
 /// Parse a received IPv6 advertisement: a raw IPv6 socket delivers the VRRP
@@ -303,14 +315,21 @@ pub fn parse_advertisement(datagram: &[u8], our_vrid: u8) -> Option<Advert> {
 /// from `IPV6_HOPLIMIT` ancillary data. Valid if the hop limit is 255 (it was
 /// not routed), the checksum over the IPv6 pseudo-header is right, and it is
 /// a v3 advertisement for `our_vrid`.
-pub fn parse_advertisement_v6(payload: &[u8], src: Ipv6Addr, hop_limit: Option<u8>, our_vrid: u8) -> Option<Advert> {
+///
+/// Both families also require the address list to be exactly `our_vip`
+/// (count 1, a payload of 8 bytes plus that one address), the check RFC 5798
+/// §7.1 allows: a second virtual router on the link that reuses the VRID for
+/// another address must not reset our master-down timer or demote our
+/// Master (review finding b6881d492a82). An instance carries one VIP, so
+/// this is what every stormlb peer sends.
+pub fn parse_advertisement_v6(payload: &[u8], src: Ipv6Addr, hop_limit: Option<u8>, our_vrid: u8, our_vip: IpAddr) -> Option<Advert> {
     if hop_limit != Some(255) {
         return None;
     }
-    parse_payload(payload, IpAddr::V6(src), our_vrid)
+    parse_payload(payload, IpAddr::V6(src), our_vrid, our_vip)
 }
 
-fn parse_payload(vrrp: &[u8], src: IpAddr, our_vrid: u8) -> Option<Advert> {
+fn parse_payload(vrrp: &[u8], src: IpAddr, our_vrid: u8, our_vip: IpAddr) -> Option<Advert> {
     if vrrp.len() < 8 {
         return None;
     }
@@ -319,10 +338,60 @@ fn parse_payload(vrrp: &[u8], src: IpAddr, our_vrid: u8) -> Option<Advert> {
     if version != 3 || vtype != 1 || vrrp[1] != our_vrid {
         return None;
     }
+    let vip: Vec<u8> = match our_vip {
+        IpAddr::V4(a) => a.octets().to_vec(),
+        IpAddr::V6(a) => a.octets().to_vec(),
+    };
+    if vrrp[3] != 1 || vrrp.len() != 8 + vip.len() || vrrp[8..] != vip[..] {
+        return None;
+    }
     if ones_complement_checksum(&with_pseudo_header(vrrp, src)) != 0 {
         return None;
     }
     Some(Advert { priority: vrrp[2], src, interval_centis: u16::from_be_bytes([vrrp[4], vrrp[5]]) & 0x0fff })
+}
+
+/// After `failures` claims in a row failed, how long a Backup waits before
+/// it tries again (if no Master has advertised meanwhile): the master-down
+/// interval, doubled per further failure, at most 30 s (or the master-down
+/// interval, if that is longer).
+pub fn claim_retry_after(master_down: Duration, failures: u32) -> Duration {
+    let cap = Duration::from_secs(30).max(master_down);
+    master_down.saturating_mul(1u32 << failures.saturating_sub(1).min(5)).min(cap)
+}
+
+/// Become Master in fact: claim the VIP through `ctl`. On failure the
+/// transition is undone (Backup, see [`VirtualRouter::on_claim_failed`]),
+/// `failures` counts it, and the returned deadline is when to try again;
+/// on success `failures` is reset and `None` is returned.
+fn claim_or_back_off(
+    vr: &mut VirtualRouter,
+    ctl: &dyn VipController,
+    vip: &str,
+    iface: &str,
+    failures: &mut u32,
+    now: Instant,
+) -> Option<Instant> {
+    match ctl.claim(vip, iface) {
+        Ok(()) => {
+            *failures = 0;
+            None
+        }
+        Err(e) => {
+            *failures = failures.saturating_add(1);
+            vr.on_claim_failed();
+            // Undo whatever part of the claim happened (idempotent).
+            let _ = ctl.release(vip, iface);
+            let wait = claim_retry_after(Duration::from_millis(vr.master_down_interval_centis() as u64 * 10), *failures);
+            warn!(
+                "VRRP vrid={}: could not claim VIP {vip} on {iface} ({} in a row): staying BACKUP, retrying in {:.1} s: {e:#}",
+                vr.vrid,
+                failures,
+                wait.as_secs_f64()
+            );
+            Some(now + wait)
+        }
+    }
 }
 
 /// One VRRP instance's settings.
@@ -370,9 +439,11 @@ fn run_loop(p: &Params, ctl: Arc<dyn VipController>, healthy: Healthy, handle: &
     info!("VRRP vrid={vrid} priority={} preempt={} iface={iface} vip={vip} -> {state:?}", p.priority, p.preempt);
     let mut next_advert = Instant::now();
     let mut master_down_deadline = Instant::now() + centis(vr.master_down_interval_centis());
+    let mut claim_failures = 0u32;
     if state == State::Master {
-        if let Err(e) = ctl.claim(&vip_s, iface) {
-            warn!("VRRP: could not claim VIP {vip} on {iface}: {e:#}");
+        if let Some(retry) = claim_or_back_off(&mut vr, ctl.as_ref(), &vip_s, iface, &mut claim_failures, Instant::now()) {
+            master_down_deadline = retry;
+            handle.set(vr.state);
         }
     }
 
@@ -399,7 +470,7 @@ fn run_loop(p: &Params, ctl: Arc<dyn VipController>, healthy: Healthy, handle: &
         let timeout = wake.saturating_duration_since(now).clamp(Duration::from_millis(10), Duration::from_millis(500));
         wire.sock.set_read_timeout(Some(timeout))?;
 
-        match wire.recv(vrid) {
+        match wire.recv(vrid, vip) {
             Ok(None) => {}
             Ok(Some(a)) => {
                 if a.src == src {
@@ -426,10 +497,10 @@ fn run_loop(p: &Params, ctl: Arc<dyn VipController>, healthy: Healthy, handle: &
                     State::Backup if now >= master_down_deadline => {
                         if vr.on_master_down_timeout(healthy()) {
                             info!("VRRP vrid={vrid}: master-down — becoming MASTER, claiming VIP {vip}");
-                            if let Err(e) = ctl.claim(&vip_s, iface) {
-                                warn!("VRRP: could not claim VIP: {e:#}");
+                            match claim_or_back_off(&mut vr, ctl.as_ref(), &vip_s, iface, &mut claim_failures, now) {
+                                Some(retry) => master_down_deadline = retry,
+                                None => next_advert = now, // advertise immediately
                             }
-                            next_advert = now; // advertise immediately
                         } else {
                             master_down_deadline = now + centis(vr.master_down_interval_centis());
                         }
@@ -496,19 +567,19 @@ impl Wire {
         }
     }
 
-    /// One datagram: `Some` if it is a valid advertisement for `vrid`.
-    fn recv(&self, vrid: u8) -> std::io::Result<Option<Advert>> {
+    /// One datagram: `Some` if it is a valid advertisement for `vrid` and `vip`.
+    fn recv(&self, vrid: u8, vip: IpAddr) -> std::io::Result<Option<Advert>> {
         let mut buf = [0u8; 512];
         match self.src {
             IpAddr::V4(_) => {
                 // SAFETY: a [u8] is a valid [MaybeUninit<u8>] of the same length.
                 let ubuf = unsafe { &mut *(&mut buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
                 let (n, _) = self.sock.recv_from(ubuf)?;
-                Ok(parse_advertisement(&buf[..n], vrid))
+                Ok(parse_advertisement(&buf[..n], vrid, vip))
             }
             IpAddr::V6(_) => {
                 let (n, from, hops) = recv_v6(&self.sock, &mut buf)?;
-                Ok(parse_advertisement_v6(&buf[..n], from, hops, vrid))
+                Ok(parse_advertisement_v6(&buf[..n], from, hops, vrid, vip))
             }
         }
     }
@@ -683,15 +754,108 @@ mod tests {
     #[test]
     fn parses_advertisement_from_raw_datagram() {
         let src = Ipv4Addr::new(192, 168, 8, 11);
-        let vrrp = encode_advertisement(51, 200, 100, &[Ipv4Addr::new(192, 168, 8, 50).into()], src.into());
+        let vrrp = encode_advertisement(51, 200, 100, &[VIP4], src.into());
         let dg = datagram(&vrrp, src.octets(), 255);
-        assert_eq!(parse_advertisement(&dg, 51), Some(Advert { priority: 200, src: src.into(), interval_centis: 100 }));
+        assert_eq!(parse_advertisement(&dg, 51, VIP4), Some(Advert { priority: 200, src: src.into(), interval_centis: 100 }));
         // Wrong vrid, a too-short datagram, a routed one (TTL < 255), a
         // checksum made for another source: all None.
-        assert!(parse_advertisement(&dg, 99).is_none());
-        assert!(parse_advertisement(&dg[..10], 51).is_none());
-        assert!(parse_advertisement(&datagram(&vrrp, src.octets(), 254), 51).is_none());
-        assert!(parse_advertisement(&datagram(&vrrp, [192, 168, 8, 12], 255), 51).is_none());
+        assert!(parse_advertisement(&dg, 99, VIP4).is_none());
+        assert!(parse_advertisement(&dg[..10], 51, VIP4).is_none());
+        assert!(parse_advertisement(&datagram(&vrrp, src.octets(), 254), 51, VIP4).is_none());
+        assert!(parse_advertisement(&datagram(&vrrp, [192, 168, 8, 12], 255), 51, VIP4).is_none());
+    }
+
+    const VIP4: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 8, 50));
+
+    /// Review finding b6881d492a82: another virtual router on the link with
+    /// our VRID but another address (or more than ours) is not our Master.
+    #[test]
+    fn an_advertisement_for_another_vip_with_our_vrid_is_dropped() {
+        let src = Ipv4Addr::new(192, 168, 8, 11);
+        let other: IpAddr = Ipv4Addr::new(192, 168, 8, 60).into();
+        // Each one is otherwise valid: v3, our vrid, TTL 255, right checksum.
+        let theirs = encode_advertisement(51, 254, 100, &[other], src.into());
+        assert!(parse_advertisement(&datagram(&theirs, src.octets(), 255), 51, VIP4).is_none(), "another address");
+        assert!(parse_advertisement(&datagram(&theirs, src.octets(), 255), 51, other).is_some(), "its own group takes it");
+        let two = encode_advertisement(51, 254, 100, &[VIP4, other], src.into());
+        assert!(parse_advertisement(&datagram(&two, src.octets(), 255), 51, VIP4).is_none(), "two addresses");
+        let none = encode_advertisement(51, 254, 100, &[], src.into());
+        assert!(parse_advertisement(&datagram(&none, src.octets(), 255), 51, VIP4).is_none(), "no address");
+        // Count 1 but trailing bytes after the address (checksum fixed up).
+        let mut long = encode_advertisement(51, 254, 100, &[VIP4], src.into());
+        long.extend_from_slice(&[0, 0, 0, 0]);
+        long[6..8].copy_from_slice(&[0, 0]);
+        let c = ones_complement_checksum(&with_pseudo_header(&long, src.into()));
+        long[6..8].copy_from_slice(&c.to_be_bytes());
+        assert_eq!(ones_complement_checksum(&with_pseudo_header(&long, src.into())), 0);
+        assert!(parse_advertisement(&datagram(&long, src.octets(), 255), 51, VIP4).is_none(), "length past the list");
+        // IPv6: the same rule.
+        let ll: Ipv6Addr = "fe80::2".parse().unwrap();
+        let ours: IpAddr = "fd09::100".parse().unwrap();
+        let pkt = encode_advertisement(51, 254, 100, &["fd09::200".parse().unwrap()], ll.into());
+        assert!(parse_advertisement_v6(&pkt, ll, Some(255), 51, ours).is_none(), "another IPv6 address");
+    }
+
+    /// A controller whose claims fail until told otherwise.
+    #[derive(Default)]
+    struct FlakyVip {
+        fail: std::sync::atomic::AtomicBool,
+        events: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl VipController for FlakyVip {
+        fn claim(&self, vip: &str, _: &str) -> Result<()> {
+            self.events.lock().unwrap().push(format!("claim {vip}"));
+            anyhow::ensure!(!self.fail.load(Ordering::Relaxed), "EPERM");
+            Ok(())
+        }
+        fn release(&self, vip: &str, _: &str) -> Result<()> {
+            self.events.lock().unwrap().push(format!("release {vip}"));
+            Ok(())
+        }
+    }
+
+    /// Review finding c765c475fce3: a Master that could not claim the VIP
+    /// goes back to Backup (no Master adverts), undoes the claim and retries
+    /// later, backing off; a successful claim keeps it Master.
+    #[test]
+    fn a_failed_claim_returns_to_backup_and_backs_off() {
+        let ctl = FlakyVip::default();
+        ctl.fail.store(true, Ordering::Relaxed);
+        let now = Instant::now();
+        let mut failures = 0;
+        // The address owner starts Master; the claim fails.
+        let mut vr = VirtualRouter::new(51, 255, true, 1);
+        assert_eq!(vr.start(true), State::Master);
+        let md = Duration::from_millis(vr.master_down_interval_centis() as u64 * 10);
+        assert_eq!(claim_or_back_off(&mut vr, &ctl, "192.168.8.50", "eth0", &mut failures, now), Some(now + md));
+        assert_eq!(vr.state, State::Backup, "no Master adverts for a VIP it does not hold");
+        assert_eq!(failures, 1);
+        assert_eq!(*ctl.events.lock().unwrap(), ["claim 192.168.8.50", "release 192.168.8.50"]);
+        // The retry (a takeover on the timer) fails too: twice as long.
+        assert!(vr.on_master_down_timeout(true));
+        assert_eq!(claim_or_back_off(&mut vr, &ctl, "192.168.8.50", "eth0", &mut failures, now), Some(now + 2 * md));
+        assert_eq!(vr.state, State::Backup);
+        // Then it works: Master, and the count starts over.
+        ctl.fail.store(false, Ordering::Relaxed);
+        assert!(vr.on_master_down_timeout(true));
+        assert_eq!(claim_or_back_off(&mut vr, &ctl, "192.168.8.50", "eth0", &mut failures, now), None);
+        assert_eq!(vr.state, State::Master);
+        assert_eq!(failures, 0);
+    }
+
+    #[test]
+    fn claim_retries_back_off_to_thirty_seconds() {
+        let md = Duration::from_millis(3610);
+        assert_eq!(claim_retry_after(md, 1), md);
+        assert_eq!(claim_retry_after(md, 2), md * 2);
+        assert_eq!(claim_retry_after(md, 3), md * 4);
+        assert_eq!(claim_retry_after(md, 4), md * 8);
+        assert_eq!(claim_retry_after(md, 5), Duration::from_secs(30));
+        assert_eq!(claim_retry_after(md, u32::MAX), Duration::from_secs(30));
+        // A master-down interval longer than the cap is never cut short.
+        let slow = Duration::from_secs(40);
+        assert_eq!(claim_retry_after(slow, 3), slow);
     }
 
     #[test]
@@ -729,16 +893,17 @@ mod tests {
     #[test]
     fn parses_an_ipv6_advertisement_only_at_hop_limit_255() {
         let src: Ipv6Addr = "fe80::2".parse().unwrap();
-        let pkt = encode_advertisement(51, 150, 100, &["fd09::100".parse().unwrap()], src.into());
+        let vip: IpAddr = "fd09::100".parse().unwrap();
+        let pkt = encode_advertisement(51, 150, 100, &[vip], src.into());
         assert_eq!(
-            parse_advertisement_v6(&pkt, src, Some(255), 51),
+            parse_advertisement_v6(&pkt, src, Some(255), 51, vip),
             Some(Advert { priority: 150, src: src.into(), interval_centis: 100 })
         );
-        assert!(parse_advertisement_v6(&pkt, src, Some(254), 51).is_none(), "routed");
-        assert!(parse_advertisement_v6(&pkt, src, None, 51).is_none(), "hop limit unknown");
-        assert!(parse_advertisement_v6(&pkt, src, Some(255), 52).is_none(), "another vrid");
-        assert!(parse_advertisement_v6(&pkt, "fe80::3".parse().unwrap(), Some(255), 51).is_none(), "another source");
-        assert!(parse_advertisement_v6(&pkt[..7], src, Some(255), 51).is_none(), "short");
+        assert!(parse_advertisement_v6(&pkt, src, Some(254), 51, vip).is_none(), "routed");
+        assert!(parse_advertisement_v6(&pkt, src, None, 51, vip).is_none(), "hop limit unknown");
+        assert!(parse_advertisement_v6(&pkt, src, Some(255), 52, vip).is_none(), "another vrid");
+        assert!(parse_advertisement_v6(&pkt, "fe80::3".parse().unwrap(), Some(255), 51, vip).is_none(), "another source");
+        assert!(parse_advertisement_v6(&pkt[..7], src, Some(255), 51, vip).is_none(), "short");
     }
 
     #[test]

@@ -452,11 +452,22 @@ RFC 5798 §6.4, as specified:
   advertisements, so its timer runs out and it takes over. A priority-0
   advertisement (a Master resigning) cuts the wait to Skew_Time. When
   master-down passes, it becomes Master and claims the VIP.
+- **A failed claim** (at start as the owner, or on takeover) is a failed
+  transition (#45): the instance goes back to Backup, so it never
+  advertises Master for an address it does not hold, removes whatever part
+  of the claim happened, and logs a warning naming how many claims in a row
+  have failed. It retries when its master-down timer next runs out with no
+  Master heard: after the master-down interval, then twice that per further
+  failure, at most 30 s.
 - **Stopping** (the VIP removed, its VRRP changed, the process told to
   stop): a Master sends priority 0, then releases the VIP.
 - Advertisements carry the RFC checksum over the IPv4 or IPv6
   pseudo-header. Ones received with an IP TTL / hop limit other than 255
-  (IPv6: from `IPV6_HOPLIMIT`) or a bad checksum are dropped.
+  (IPv6: from `IPV6_HOPLIMIT`) or a bad checksum are dropped. So is one
+  whose address list is not exactly this VIP (count 1, that address, no
+  bytes after it), as RFC 5798 §7.1 allows: another virtual router on the
+  link that reuses the VRID for another address does not reset our timer
+  or demote our Master (#45).
 - No virtual MAC: the node's own MAC answers for the VIP, announced on
   takeover. For IPv6 that also means no virtual link-local address, so an
   advertisement's address list carries the VIP itself rather than the
@@ -707,7 +718,9 @@ gratuitous ARP / unsolicited NA updating the peer's neighbour entry, a
 resign on no healthy backend, preempting back, priority 0 on removal
 cutting the takeover to about a second, and a VIP's VRRP replaced three
 times while Master (at priority 255 the new instance claims at once) without
-the old instance's release taking the address away (#44). (The IPv6 neighbour check turns on
+the old instance's release taking the address away (#44), and adverts for
+another VIP with the same VRID and a higher priority leaving A Master of its
+own (#45). (The IPv6 neighbour check turns on
 `forwarding` and `accept_untracked_na` on the observer's veth, since Linux
 only makes an entry from an untracked NA on a router; kernel 5.19+, and on
 an older kernel it is skipped and says so.)

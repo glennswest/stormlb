@@ -17,6 +17,9 @@
 #   6. B's VIP is deleted: B sends priority 0 and releases; A takes over fast.
 #   7. A's VRRP is replaced while Master (priority 255, then 254, then 255):
 #      the old instance releases before the new one claims, so A keeps it.
+#   8. B makes another VIP with the same VRID at priority 200 while A (100)
+#      holds ours: its adverts name another address, so A is not demoted
+#      and keeps the VIP, and B takes its own (#45, b6881d492a82).
 #
 # Run (needs a built binary; dev allows unprivileged user namespaces):
 #   cargo build --release --locked && tests/vrrp-netns.sh   # or: tests/vrrp-netns.sh <path to stormlb>
@@ -80,11 +83,11 @@ api() {
     sed '1,/^\r$/d' "$W/resp"
 }
 # The VIP under test ($VIP, $FAM 4 or 6, $PLEN 32 or 128) is set per pass.
-spec() { # iface prio backend-port
+spec() { # iface prio backend-port [address, default $VIP]
     printf '{"address":"%s","port":7443,"backends":[{"address":"127.0.0.1","port":%s}],"health":{"mode":"tcp","interval_secs":1,"timeout_secs":1},"vrrp":{"interface":"%s","vrid":51,"priority":%s,"advert_interval_secs":1}}' \
-        "$VIP" "$3" "$1" "$2"
+        "${4:-$VIP}" "$3" "$1" "$2"
 }
-holds() { ns "$1" ip -"$FAM" -o addr show dev "$2" | grep -q " $VIP/$PLEN"; }
+holds() { ns "$1" ip -"$FAM" -o addr show dev "$2" | grep -q " ${3:-$VIP}/$PLEN"; }
 not_holds() { ! holds "$@"; }
 # Wait up to $1 seconds for a command to succeed; prints how long it took.
 within() {
@@ -106,7 +109,7 @@ start a "$NA"
 start b "$NB"
 BMAC=$(ns "$NB" cat /sys/class/net/vb/address 2>/dev/null || ns "$NB" ip -o link show vb | sed -n 's/.*link\/ether \([0-9a-f:]*\).*/\1/p')
 
-# One pass of the six checks for VIP $VIP, VIP name $1, IPv$FAM.
+# One pass of the eight checks for VIP $VIP, VIP name $1, IPv$FAM.
 checks() {
     local name=$1 P="IPv$FAM"
     local path=/api/v1/vips/$name
@@ -171,12 +174,31 @@ checks() {
         holds "$NA" va || fail "$P: the old VRRP instance released the VIP the new one (priority $prio) holds"
     done
     pass "$P: A's VRRP replaced three times while Master: the VIP stayed claimed"
+
+    # 8. Another virtual router with our VRID (#45, b6881d492a82): A at 100
+    #    holds the VIP; B makes VIP2 with vrid 51 at 200. B's adverts carry
+    #    VIP2, so A must not take them as a higher-priority Master of ours.
+    api "$NA" PUT "$path" "$(spec va 100 9109)" > /dev/null
+    within 6 a_master > /dev/null || fail "$P: A is not master at priority 100"
+    api "$NB" PUT "$path-other" "$(spec vb 200 9109 "$VIP2")" > /dev/null
+    [ "$(cat "$W/status")" = 201 ] || fail "$P B: PUT of the other VIP answered $(cat "$W/status"): $(cat "$W/resp")"
+    ms=$(within 8 holds "$NB" vb "$VIP2") || fail "$P: B never took its own VIP $VIP2"
+    # Long enough for B's adverts to have demoted A several times over.
+    for _ in $(seq 1 40); do
+        holds "$NA" va || fail "$P: A released the VIP on adverts for another address with its VRID"
+        sleep 0.1
+    done
+    api "$NA" GET "$path" | grep -q '"vrrp":"master"' || fail "$P: A is no longer master after B's adverts for $VIP2"
+    holds "$NA" va "$VIP2" && fail "$P: A claimed B's VIP $VIP2"
+    pass "$P: B's adverts for $VIP2 on vrid 51 (took it in ${ms} ms) left A master of $VIP"
+    api "$NB" DELETE "$path-other" > /dev/null
+    api "$NA" DELETE "$path" > /dev/null
 }
 
-VIP=10.9.0.100 FAM=4 PLEN=32
+VIP=10.9.0.100 VIP2=10.9.0.101 FAM=4 PLEN=32
 checks api4
 if [ "$HAVE6" = 1 ]; then
-    VIP=fd09::100 FAM=6 PLEN=128
+    VIP=fd09::100 VIP2=fd09::101 FAM=6 PLEN=128
     checks api6
 else
     echo "SKIP: IPv6 pass (no IPv6 in this kernel)"

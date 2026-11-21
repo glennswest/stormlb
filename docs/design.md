@@ -69,7 +69,10 @@ token.
 preemption (the highest-priority healthy master holds it), resigns with
 priority 0 when it stops or loses every healthy backend, and claims the
 address over rtnetlink with a raw gratuitous ARP, so the golden needs no
-`ip` or `arping`.
+`ip` or `arping`. An instance listens only to advertisements for its own
+VRID **and** VIP, since one link may carry several groups and VRIDs get
+reused. Its Master state is only ever what it holds: a claim that fails
+puts it back to Backup and it retries with a backoff (#45).
 
 ## L2 vs L3
 
