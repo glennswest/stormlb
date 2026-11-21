@@ -69,6 +69,10 @@ impl Handle {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
+    /// Whether [`Handle::stop`] was called.
+    pub fn is_stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
     /// `"master"`, `"backup"`, or `"stopped"` (not started, stopped, or failed).
     pub fn state(&self) -> &'static str {
         match self.state.load(Ordering::Relaxed) {

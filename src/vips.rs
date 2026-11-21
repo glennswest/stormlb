@@ -9,6 +9,11 @@
 //!
 //! The VIP from the TOML `[vip]` table is `default` and is read-only here; the
 //! ones made through the API ([`crate::api`]) are saved to `state_file`.
+//!
+//! Changes are serialized: an apply or remove and the save of the state it
+//! leaves happen under one lock, so the file never lags the live registry
+//! (#44, 96715e147614). A VRRP instance replaced or removed releases the
+//! address before its successor for the same address runs (#44, cb0db54fdbcc).
 
 use crate::config::{Config, HealthSpec};
 use crate::health::{self, Checker};
@@ -17,7 +22,7 @@ use crate::vip::{Netlink, VipController};
 use crate::{balancer, vrrp};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -162,6 +167,22 @@ pub struct Registry {
     pending: Mutex<BTreeMap<String, VipSpec>>,
     state_file: Option<PathBuf>,
     ctl: Arc<dyn VipController>,
+    /// Held across a change and the save of what it leaves, so concurrent API
+    /// requests cannot write snapshots out of order (#44, 96715e147614).
+    changes: Mutex<()>,
+    /// The VRRP threads of each VIP address, kept after their instance is
+    /// stopped until they finish: a successor for the same address waits for
+    /// every stopped one to finish (and release the address) before it runs,
+    /// or an old thread's late release would remove the address the new one
+    /// just claimed (#44, cb0db54fdbcc). A running one (another VIP on the
+    /// same address) is not waited for.
+    vrrp_threads: Mutex<HashMap<IpAddr, Vec<VrrpThread>>>,
+}
+
+/// A VRRP instance's thread and its handle.
+struct VrrpThread {
+    handle: Arc<vrrp::Handle>,
+    thread: std::thread::JoinHandle<()>,
 }
 
 /// The validated form of a spec.
@@ -178,7 +199,14 @@ impl Registry {
 
     /// With a given VIP controller (tests use a recording mock).
     pub fn with_controller(state_file: Option<PathBuf>, ctl: Arc<dyn VipController>) -> Self {
-        Self { vips: Mutex::new(BTreeMap::new()), pending: Mutex::new(BTreeMap::new()), state_file, ctl }
+        Self {
+            vips: Mutex::new(BTreeMap::new()),
+            pending: Mutex::new(BTreeMap::new()),
+            state_file,
+            ctl,
+            changes: Mutex::new(()),
+            vrrp_threads: Mutex::new(HashMap::new()),
+        }
     }
 
     /// The `[vip]` table of a TOML config as a spec, if it has one.
@@ -211,6 +239,7 @@ impl Registry {
     /// logged, and stays in the file.
     pub fn load_state(&self) -> anyhow::Result<usize> {
         let Some(path) = &self.state_file else { return Ok(0) };
+        let _changes = self.changes.lock().unwrap();
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -234,6 +263,7 @@ impl Registry {
     /// Create or replace the API VIP `name`. `Ok(true)` when it was created.
     pub fn apply(&self, name: &str, spec: VipSpec) -> Result<bool, ApplyError> {
         valid_name(name)?;
+        let _changes = self.changes.lock().unwrap();
         if self.vips.lock().unwrap().get(name).is_some_and(|e| e.from_config) {
             return Err(ApplyError::Conflict(format!("{name} is the [vip] of the config file; change it there")));
         }
@@ -246,6 +276,7 @@ impl Registry {
     /// Remove the API VIP `name`: its listener closes (connections already
     /// proxied run on), its VRRP instance releases the address.
     pub fn remove(&self, name: &str) -> Result<(), ApplyError> {
+        let _changes = self.changes.lock().unwrap();
         {
             let mut vips = self.vips.lock().unwrap();
             match vips.get(name) {
@@ -268,8 +299,15 @@ impl Registry {
 
     /// Stop every VIP (listeners closed, health loops ended, VRRP releasing
     /// its address) without touching `state_file`: what a process exit does.
+    /// Returns once every VRRP thread has finished, so no address is left
+    /// claimed (about half a second for a Master).
     pub fn stop_all(&self) {
+        let _changes = self.changes.lock().unwrap();
         std::mem::take(&mut *self.vips.lock().unwrap());
+        let threads = std::mem::take(&mut *self.vrrp_threads.lock().unwrap());
+        for t in threads.into_values().flatten() {
+            let _ = t.thread.join();
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<VipView> {
@@ -309,7 +347,7 @@ impl Registry {
                     if let Some(h) = e.vrrp.take() {
                         h.stop();
                     }
-                    e.vrrp = start_vrrp(name, &spec, c.vrrp_vip, self.ctl.clone(), e.pool.clone());
+                    e.vrrp = self.start_vrrp(name, &spec, c.vrrp_vip, e.pool.clone());
                 }
                 e.spec = spec;
                 info!("VIP {name} updated: {} backends", e.pool.backends().len());
@@ -321,7 +359,7 @@ impl Registry {
                 let pool = Arc::new(Pool::new(c.backends));
                 let health = tokio::spawn(health::run(pool.clone(), checker.clone()));
                 let serve = spawn_serve(listener, pool.clone(), name);
-                let vrrp = start_vrrp(name, &spec, c.vrrp_vip, self.ctl.clone(), pool.clone());
+                let vrrp = self.start_vrrp(name, &spec, c.vrrp_vip, pool.clone());
                 info!("VIP {name} serving on {} -> {} backends", c.listen, pool.backends().len());
                 vips.insert(name.to_string(), Entry { spec, from_config, listen: c.listen, pool, checker, health, serve, vrrp });
                 Ok(true)
@@ -329,7 +367,49 @@ impl Registry {
         }
     }
 
+    /// Start the VIP's VRRP instance. It holds the address only while the VIP
+    /// has a healthy backend. Its thread first waits for the previous VRRP
+    /// thread of the same address (stopped by the caller) to finish releasing
+    /// it; the wait is in the new thread, so the API never blocks on it.
+    fn start_vrrp(&self, name: &str, spec: &VipSpec, vip: Option<IpAddr>, pool: Arc<Pool>) -> Option<Arc<vrrp::Handle>> {
+        let (v, vip) = (spec.vrrp.clone()?, vip?);
+        let h = Arc::new(vrrp::Handle::default());
+        let h2 = h.clone();
+        let name = name.to_string();
+        let params = vrrp::Params {
+            vrid: v.vrid,
+            priority: v.priority,
+            preempt: v.preempt,
+            advert_interval_secs: v.advert_interval_secs,
+            iface: v.interface,
+            vip,
+        };
+        let healthy: vrrp::Healthy = Arc::new(move || pool.healthy_count() > 0);
+        let ctl = self.ctl.clone();
+        let mut threads = self.vrrp_threads.lock().unwrap();
+        for ts in threads.values_mut() {
+            ts.retain(|t| !t.thread.is_finished());
+        }
+        threads.retain(|_, ts| !ts.is_empty());
+        let same = threads.entry(vip).or_default();
+        let (stopped, running): (Vec<_>, Vec<_>) = std::mem::take(same).into_iter().partition(|t| t.handle.is_stopped());
+        *same = running;
+        let prev = stopped.into_iter().map(|t| t.thread).collect();
+        // VRRP is a blocking control loop (raw socket) — its own OS thread.
+        let t = after(prev, move || {
+            if h2.is_stopped() {
+                return; // replaced or removed while it waited
+            }
+            if let Err(e) = vrrp::run(params, ctl, healthy, h2) {
+                warn!("VIP {name}: VRRP exited: {e:#}");
+            }
+        });
+        same.push(VrrpThread { handle: h.clone(), thread: t });
+        Some(h)
+    }
+
     /// Write the API VIPs (and saved ones that did not start) to `state_file`.
+    /// Callers hold `changes`.
     fn save(&self) -> Result<(), ApplyError> {
         let Some(path) = &self.state_file else { return Ok(()) };
         let mut vips: BTreeMap<String, VipSpec> = self.pending.lock().unwrap().clone();
@@ -353,10 +433,85 @@ fn write_atomic(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("renaming {} into place", tmp.display()))?;
-    Ok(())
+    // A temporary name of its own per write (process and sequence), so no
+    // two writers ever share one (#44, 96715e147614).
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{file}.{}.{seq}.tmp", std::process::id()));
+    let r = std::fs::write(&tmp, text)
+        .with_context(|| format!("writing {}", tmp.display()))
+        .and_then(|()| std::fs::rename(&tmp, path).with_context(|| format!("renaming {} into place", tmp.display())));
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
+}
+
+/// Run `f` on a new thread once every thread of `prev` has finished.
+fn after(prev: Vec<std::thread::JoinHandle<()>>, f: impl FnOnce() + Send + 'static) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        for p in prev {
+            let _ = p.join();
+        }
+        f()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    /// The successor runs only after its predecessor finished: an old VRRP
+    /// thread's release always lands before the new one's claim (#44,
+    /// cb0db54fdbcc).
+    #[test]
+    fn a_successor_runs_after_its_predecessor_finished() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let l = log.clone();
+        let old = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            l.lock().unwrap().push("old released");
+        });
+        let l = log.clone();
+        after(vec![old], move || l.lock().unwrap().push("new claimed")).join().unwrap();
+        assert_eq!(*log.lock().unwrap(), ["old released", "new claimed"]);
+    }
+
+    /// Each write uses a temporary name of its own and leaves none behind
+    /// (#44, 96715e147614): writers on many threads never fail and the file is
+    /// one of the whole texts written.
+    #[test]
+    fn concurrent_atomic_writes_never_share_a_temporary_file() {
+        let dir = std::env::temp_dir().join(format!("stormlb-wa-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("vips.json");
+        let failed = Arc::new(AtomicBool::new(false));
+        let ts: Vec<_> = (0..8)
+            .map(|i| {
+                let (path, failed) = (path.clone(), failed.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        if write_atomic(&path, &format!("{i}").repeat(4096)).is_err() {
+                            failed.store(true, Ordering::Relaxed);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in ts {
+            t.join().unwrap();
+        }
+        assert!(!failed.load(Ordering::Relaxed), "a write failed");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.len(), 4096);
+        assert!(text.bytes().all(|b| b == text.as_bytes()[0]), "torn file");
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left, [std::ffi::OsString::from("vips.json")], "temporary files left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 fn view(name: &str, e: &Entry) -> VipView {
@@ -390,31 +545,6 @@ fn spawn_serve(l: tokio::net::TcpListener, pool: Arc<Pool>, name: &str) -> JoinH
 
 fn bind(listen: SocketAddr) -> Result<tokio::net::TcpListener, ApplyError> {
     balancer::bind(listen).map_err(|e| ApplyError::Conflict(format!("{e:#}")))
-}
-
-/// Start the VIP's VRRP instance. It holds the address only while the VIP has
-/// a healthy backend.
-fn start_vrrp(name: &str, spec: &VipSpec, vip: Option<IpAddr>, ctl: Arc<dyn VipController>, pool: Arc<Pool>) -> Option<Arc<vrrp::Handle>> {
-    let (v, vip) = (spec.vrrp.clone()?, vip?);
-    let h = Arc::new(vrrp::Handle::default());
-    let h2 = h.clone();
-    let name = name.to_string();
-    let params = vrrp::Params {
-        vrid: v.vrid,
-        priority: v.priority,
-        preempt: v.preempt,
-        advert_interval_secs: v.advert_interval_secs,
-        iface: v.interface,
-        vip,
-    };
-    let healthy: vrrp::Healthy = Arc::new(move || pool.healthy_count() > 0);
-    // VRRP is a blocking control loop (raw socket) — its own OS thread.
-    std::thread::spawn(move || {
-        if let Err(e) = vrrp::run(params, ctl, healthy, h2) {
-            warn!("VIP {name}: VRRP exited: {e:#}");
-        }
-    });
-    Some(h)
 }
 
 fn valid_name(name: &str) -> Result<(), ApplyError> {

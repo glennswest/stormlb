@@ -58,7 +58,10 @@ same node, which is why stormcluster puts the cluster's VIP on its
 
 **Persistence and access.** VIPs made through the API are saved to
 `state_file` and served again at start, so a stormlb restart doesn't wait for
-stormcluster to notice. The API is loopback by default: stormcluster runs on
+stormcluster to notice. A change and its save happen under one lock, so the
+file never lags what is served (#44). A VRRP instance that is replaced or
+removed finishes (releasing the address) before its successor for the same
+address starts, waited for on the successor's own thread (#44). The API is loopback by default: stormcluster runs on
 every node and calls its own stormlb. Anywhere else, it needs a bearer
 token.
 

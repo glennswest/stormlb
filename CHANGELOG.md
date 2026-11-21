@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### 2026-11-20
+- **fix:** concurrent VIP API changes no longer race on the state file:
+  each apply/remove and the save of what it leaves run under one lock, and
+  every save writes a temporary file of its own before the rename, so a
+  restart can neither resurrect a removed VIP nor lose a new one (#44,
+  review finding 96715e147614).
+- **fix:** replacing or removing a VIP's VRRP instance no longer races its
+  successor: the new instance's thread waits for every stopped one of the
+  same address to finish releasing before it runs, so the old release can't
+  remove the address the new Master just claimed. `stop_all` waits for the
+  VRRP threads too (#44, review finding cb0db54fdbcc).
+- **test:** unit tests for the hand-off order and concurrent atomic writes;
+  `tests/vips.rs` concurrent PUT/DELETE vs the state file;
+  `tests/vrrp-netns.sh` check 7 (VRRP replaced three times while Master).
 - **fix:** `auto:<port>` listeners (router, router TLS, metrics) must bind
   both the node address and loopback; a partial bind now fails naming the
   address that would not bind, instead of leaving a router that passes its

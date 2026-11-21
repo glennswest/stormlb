@@ -395,11 +395,16 @@ What a `PUT` does to a running VIP:
   never cut,** whatever changes.
 - A new `bind`/`port` binds the new listener before the old one closes.
 - A changed `vrrp` or `address` stops the VIP's VRRP instance (releasing the
-  address if it was Master) and starts a new one.
+  address if it was Master) and starts a new one. The new one runs only once
+  the old one has finished (within about half a second), so the old
+  instance's release can never remove the address the new one claimed (#44).
 
 `DELETE` closes the listener and stops VRRP; connections already proxied
 run on. With `state_file`, every change is saved: if the save fails, the
-change is still in effect, and the answer is a 500 that says so.
+change is still in effect, and the answer is a 500 that says so. Changes
+are made one at a time, each saved before the next starts, so concurrent
+requests leave the file equal to what is served; each save writes a
+temporary file of its own and renames it into place (#44).
 
 Errors are `{"error": "…"}`: 400, 401 (no or wrong token), 404, 405, 409,
 411 (chunked body), 413 (body over 1 MiB), 431 (head over 16 KiB), 500.
@@ -692,8 +697,10 @@ VRRP on the veth. Checked against the kernel's `ip addr` and `ip neigh`,
 once with an IPv4 VIP and once with an IPv6 one (`fd09::100`, #39):
 takeover after master-down, preemption by the higher priority, the
 gratuitous ARP / unsolicited NA updating the peer's neighbour entry, a
-resign on no healthy backend, preempting back, and priority 0 on removal
-cutting the takeover to about a second. (The IPv6 neighbour check turns on
+resign on no healthy backend, preempting back, priority 0 on removal
+cutting the takeover to about a second, and a VIP's VRRP replaced three
+times while Master (at priority 255 the new instance claims at once) without
+the old instance's release taking the address away (#44). (The IPv6 neighbour check turns on
 `forwarding` and `accept_untracked_na` on the observer's veth, since Linux
 only makes an entry from an untracked NA on a router; kernel 5.19+, and on
 an older kernel it is skipped and says so.)

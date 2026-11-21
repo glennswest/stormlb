@@ -378,3 +378,51 @@ async fn tls_readyz(dir: &std::path::Path) -> SocketAddr {
     });
     addr
 }
+
+/// Concurrent PUTs and DELETEs each save what they leave under one lock (#44,
+/// 96715e147614): none fails, and the state file ends equal to the live
+/// registry, so a restart brings back exactly what was being served.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_changes_leave_the_state_file_equal_to_the_registry() {
+    let (a, b) = (backend(b'A').await, backend(b'B').await);
+    let dir = tmpdir("race");
+    let state = dir.join("vips.json");
+    let reg = Arc::new(Registry::new(Some(state.clone())));
+    let mut ports = Vec::new();
+    for _ in 0..8 {
+        ports.push(free_port().await);
+    }
+    let mut tasks = Vec::new();
+    for (i, port) in ports.into_iter().enumerate() {
+        let reg = reg.clone();
+        tasks.push(tokio::task::spawn_blocking(move || {
+            let name = format!("v{i}");
+            for round in 0..40 {
+                let backends = if round % 2 == 0 { vec![a] } else { vec![a, b] };
+                let s: VipSpec = serde_json::from_str(&spec(port, &backends)).unwrap();
+                reg.apply(&name, s).unwrap();
+            }
+            // Odd VIPs end removed, even ones end present.
+            if i % 2 == 1 {
+                reg.remove(&name).unwrap();
+            }
+        }));
+    }
+    for t in tasks {
+        t.await.unwrap();
+    }
+    let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+    let mut on_disk: Vec<String> = saved["vips"].as_object().unwrap().keys().cloned().collect();
+    on_disk.sort();
+    let live: Vec<String> = reg.list().into_iter().map(|v| v.name).collect();
+    assert_eq!(on_disk, live);
+    assert_eq!(live, ["v0", "v2", "v4", "v6"]);
+    // The last write of each survivor is on disk: its final backends (round 39: a and b).
+    for n in &live {
+        assert_eq!(saved["vips"][n]["backends"].as_array().unwrap().len(), 2, "{n}: a stale snapshot on disk");
+    }
+    let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(left.len(), 1, "temporary files left behind: {left:?}");
+    reg.stop_all();
+    let _ = std::fs::remove_dir_all(dir);
+}
