@@ -458,62 +458,6 @@ fn after(prev: Vec<std::thread::JoinHandle<()>>, f: impl FnOnce() + Send + 'stat
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
-
-    /// The successor runs only after its predecessor finished: an old VRRP
-    /// thread's release always lands before the new one's claim (#44,
-    /// cb0db54fdbcc).
-    #[test]
-    fn a_successor_runs_after_its_predecessor_finished() {
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let l = log.clone();
-        let old = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(300));
-            l.lock().unwrap().push("old released");
-        });
-        let l = log.clone();
-        after(vec![old], move || l.lock().unwrap().push("new claimed")).join().unwrap();
-        assert_eq!(*log.lock().unwrap(), ["old released", "new claimed"]);
-    }
-
-    /// Each write uses a temporary name of its own and leaves none behind
-    /// (#44, 96715e147614): writers on many threads never fail and the file is
-    /// one of the whole texts written.
-    #[test]
-    fn concurrent_atomic_writes_never_share_a_temporary_file() {
-        let dir = std::env::temp_dir().join(format!("stormlb-wa-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("vips.json");
-        let failed = Arc::new(AtomicBool::new(false));
-        let ts: Vec<_> = (0..8)
-            .map(|i| {
-                let (path, failed) = (path.clone(), failed.clone());
-                std::thread::spawn(move || {
-                    for _ in 0..50 {
-                        if write_atomic(&path, &format!("{i}").repeat(4096)).is_err() {
-                            failed.store(true, Ordering::Relaxed);
-                        }
-                    }
-                })
-            })
-            .collect();
-        for t in ts {
-            t.join().unwrap();
-        }
-        assert!(!failed.load(Ordering::Relaxed), "a write failed");
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(text.len(), 4096);
-        assert!(text.bytes().all(|b| b == text.as_bytes()[0]), "torn file");
-        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
-        assert_eq!(left, [std::ffi::OsString::from("vips.json")], "temporary files left behind");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
 fn view(name: &str, e: &Entry) -> VipView {
     let backends: Vec<BackendStatus> = e
         .pool
@@ -610,4 +554,60 @@ fn check(spec: &VipSpec) -> Result<Checked, ApplyError> {
 /// Whether `spec` would be accepted by [`Checker::set_spec`].
 fn health_ok(spec: &HealthSpec) -> Result<(), ApplyError> {
     health::client(spec).map(|_| ()).map_err(|e| ApplyError::Invalid(format!("health: {e:#}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    /// The successor runs only after its predecessor finished: an old VRRP
+    /// thread's release always lands before the new one's claim (#44,
+    /// cb0db54fdbcc).
+    #[test]
+    fn a_successor_runs_after_its_predecessor_finished() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let l = log.clone();
+        let old = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            l.lock().unwrap().push("old released");
+        });
+        let l = log.clone();
+        after(vec![old], move || l.lock().unwrap().push("new claimed")).join().unwrap();
+        assert_eq!(*log.lock().unwrap(), ["old released", "new claimed"]);
+    }
+
+    /// Each write uses a temporary name of its own and leaves none behind
+    /// (#44, 96715e147614): writers on many threads never fail and the file is
+    /// one of the whole texts written.
+    #[test]
+    fn concurrent_atomic_writes_never_share_a_temporary_file() {
+        let dir = std::env::temp_dir().join(format!("stormlb-wa-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("vips.json");
+        let failed = Arc::new(AtomicBool::new(false));
+        let ts: Vec<_> = (0..8)
+            .map(|i| {
+                let (path, failed) = (path.clone(), failed.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        if write_atomic(&path, &format!("{i}").repeat(4096)).is_err() {
+                            failed.store(true, Ordering::Relaxed);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in ts {
+            t.join().unwrap();
+        }
+        assert!(!failed.load(Ordering::Relaxed), "a write failed");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.len(), 4096);
+        assert!(text.bytes().all(|b| b == text.as_bytes()[0]), "torn file");
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left, [std::ffi::OsString::from("vips.json")], "temporary files left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

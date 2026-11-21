@@ -16,6 +16,8 @@
 - **test:** unit tests for the hand-off order and concurrent atomic writes;
   `tests/vips.rs` concurrent PUT/DELETE vs the state file;
   `tests/vrrp-netns.sh` check 7 (VRRP replaced three times while Master).
+- **fix:** clippy `-D warnings`: vips' test module moved to the end of the
+  file, `std::slice::from_ref` in the #43 router test (#47).
 - **fix:** `auto:<port>` listeners (router, router TLS, metrics) must bind
   both the node address and loopback; a partial bind now fails naming the
   address that would not bind, instead of leaving a router that passes its

@@ -1302,7 +1302,7 @@ mod tests {
         // The one that bound first was dropped with the failure.
         TcpListener::bind(&free).await.expect("the free address was released");
         // Every address binding is still a success.
-        let ls = bind_all(&[free.clone()]).await.unwrap();
+        let ls = bind_all(std::slice::from_ref(&free)).await.unwrap();
         assert_eq!(ls.len(), 1);
     }
 
