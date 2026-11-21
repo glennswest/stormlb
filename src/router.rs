@@ -974,6 +974,7 @@ async fn poll_routes(cfg: RouterCfg, table: Shared, upstream: Upstream) {
     let mut api = ApiClient::default();
     let mut known = Known::default();
     let mut said = None::<String>;
+    let mut identity_said = false;
     let mut status = StatusLog::default();
     let mut last_len = usize::MAX;
     loop {
@@ -1000,6 +1001,15 @@ async fn poll_routes(cfg: RouterCfg, table: Shared, upstream: Upstream) {
                 if new.hosts() != last_len {
                     info!(routes = new.hosts(), "route table refreshed");
                     last_len = new.hosts();
+                }
+                // Once: which identity the table was read as (stormlb#33), so a
+                // node's log shows the token is in use, not anonymous admin.
+                if !identity_said {
+                    match (&token, &cfg.token_file) {
+                        (Some(_), Some(path)) => info!("route table read with the router's token ({path})"),
+                        _ => info!("route table read anonymously (no [router] token_file)"),
+                    }
+                    identity_said = true;
                 }
                 let new = Arc::new(new);
                 *table.write().unwrap() = new.clone();

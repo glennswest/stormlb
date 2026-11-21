@@ -231,4 +231,9 @@ the cluster CA alone. Both are files the router is pointed at, not
 credentials it mints, which keeps stormlb out of certificate issuance. A
 missing token stops refreshes rather than falling back to anonymous, so a
 broken mount shows as a stale table and a log line, not as a silent change
-of identity.
+of identity. The golden names `storm-lb/stormlb`'s token, which the apiserver
+golden mints to `/data/stormcert/stormlb.token` (stormcos#395, #33). The
+router runs only where stormcos writes `start stormlb` (sno, bastion), which
+are apiserver nodes, so the file is always minted locally. Because a missing
+token is not a fallback, the image that names it ships only with an
+apiserver image that mints it (`ships-with rustkube-apiserver`).

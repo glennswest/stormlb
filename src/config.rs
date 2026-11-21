@@ -248,7 +248,8 @@ priority = 200
 
     /// The `[router]` part of the golden's config (stormcentral registry,
     /// stormlb#21): tier-0's CA for the apiserver and backends, and the
-    /// router's own pair from stormcos's `stormcert-serving-router`.
+    /// router's own pair from stormcos's `stormcert-serving-router`, and its
+    /// ServiceAccount token from `stormcert-sa-stormlb` (stormcos#395, #33).
     #[test]
     fn parses_the_shipped_router_config() {
         let toml = r#"
@@ -256,6 +257,7 @@ priority = 200
 listen = "auto:80"
 backend_ca_file = "/data/stormcert/ca.crt"
 ca_file = "/data/stormcert/ca.crt"
+token_file = "/data/stormcert/stormlb.token"
 
 [router.tls]
 certs = [{ cert_file = "/data/stormcert/router.crt", key_file = "/data/stormcert/router.key" }]
@@ -273,7 +275,7 @@ listen = "auto:9111"
         assert_eq!(r.apiserver, "https://127.0.0.1:6443");
         assert_eq!(r.ca_file.as_deref(), Some("/data/stormcert/ca.crt"));
         assert_eq!(r.backend_ca_file.as_deref(), Some("/data/stormcert/ca.crt"));
-        assert!(r.token_file.is_none(), "token_file waits on stormcos#76");
+        assert_eq!(r.token_file.as_deref(), Some("/data/stormcert/stormlb.token"));
         let t = r.tls.unwrap();
         assert_eq!(t.listen, "auto:443");
         assert!(t.redirect);

@@ -539,15 +539,20 @@ deliberate commit of its own.
   - Done in 07e6248. sc-build passed there on a build VM: release build,
     68 unit + every integration test, clippy and cargo doc -D warnings,
     test crate 12 unit + 3 harness (medium 26). #42 closed, image requested.
-- [ ] #33 (P2) shipped config sets `[router] token_file`. Blocked
-      (2026-11-20): stormcos mints 24 service tokens in build-goldens.sh,
-      not stormlb's; its issue is stormcos#395 (open). Posted the current
-      RBAC there (list httproutes, referencegrants, services, endpoints,
-      endpointslices; patch httproutes/status; SA probably storm-lb/stormlb
-      since stormcos#1020). Docs cite #395. Proposed --after stormcos#395.
-      Then: `stormcentral note` the master the registry edit (`token_file =
-      "/data/stormcert/stormlb.token"` or wherever #395 puts it), image,
-      check on a node with anonymous admin off, close.
+- [ ] #33 (P2) shipped config sets `[router] token_file`. stormcos#395
+      shipped in af14725 (2026-11-20): 85-stormlb.yaml (storm-lb/stormlb,
+      the router's verbs) and `stormcert-sa-stormlb` minting
+      `/data/stormcert/stormlb.token` in the apiserver golden; first image
+      with it golden-rustkube-apiserver-e42b0c1addb5. A missing token stops
+      refreshes (design.md, no anonymous fallback), so the stormlb image
+      must ship with >= that apiserver image.
+  - [x] Shipped-config test, identity logged once on the first refresh,
+        README/design/deck, CHANGELOG.
+  - [ ] Registry: `stormcentral note` the master `component edit stormlb
+        --file tmp/stormlb-component-33.toml` (export + token_file only).
+  - [ ] sc-build; once export shows token_file: image, `ships-with
+        rustkube-apiserver@>=golden-rustkube-apiserver-e42b0c1addb5`,
+        `shipped` with proof `log:route table read with the router's token`.
 - [x] #44 (P1) review: 96715e147614 (state file: one `changes` lock over
       mutate + save, unique temp per write) and cb0db54fdbcc (VRRP thread
       handles kept per address; a successor joins the stopped ones before

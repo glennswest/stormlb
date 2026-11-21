@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### 2026-11-21
+- **chore:** #33: the shipped config sets `[router] token_file =
+  "/data/stormcert/stormlb.token"`, the `storm-lb/stormlb` ServiceAccount
+  token the apiserver golden mints (`stormcert-sa-stormlb`, stormcos#395,
+  first in golden-rustkube-apiserver-e42b0c1addb5). The router reads as its
+  own identity, not anonymous admin. The registry edit is the master's
+  (#829), and the image ships only with an apiserver that mints the token.
+- **feat:** the router logs once which identity its first refresh used
+  (`route table read with the router's token (<path>)` or
+  `… anonymously`).
+- **test:** `parses_the_shipped_router_config` carries `token_file`.
+- **docs:** README (router, `token_file`, How it ships, #33 off the gaps),
+  design.md, deck.
+
 ### 2026-11-20
 - **fix:** concurrent VIP API changes no longer race on the state file:
   each apply/remove and the save of what it leaves run under one lock, and
