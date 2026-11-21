@@ -573,11 +573,16 @@ deliberate commit of its own.
       bound (loopback alone = healthy but unreachable). `bind_all`: every
       address or fail naming it; unit tests (partial bind, auto with a held
       port); README, design.md, CHANGELOG. Then sc-build, image, close.
-- [ ] #45 (P1) review b6881d492a82 + c765c475fce3 in src/vrrp.rs.
+- [x] #45 (P1) review b6881d492a82 + c765c475fce3 in src/vrrp.rs.
   - [x] Parser takes the VIP: count 1, exact length, the address (§7.1).
   - [x] Claim failure: `on_claim_failed` → Backup, release, retry after
         master-down doubling to 30 s (`claim_or_back_off`, pure, unit-tested
         with a failing controller).
   - [x] Unit tests, vrrp-netns check 8 (foreign VIP on our VRID), README,
         design.md, CHANGELOG.
-  - [ ] sc-build (release, tests, clippy, doc, vrrp-netns), image, close.
+  - Done in 956127e. sc-build passed there on a build VM: release build,
+    75 unit + every integration test, clippy and cargo doc -D warnings,
+    tests/vrrp-netns.sh 3 runs (8 IPv4 + 8 IPv6 checks each; check 8: B
+    took its own VIP in ~3.2 s and A stayed Master). Claim failure is
+    unit-tested only (no way to make a netlink claim fail in the netns).
+    #45 closed, image requested.
