@@ -15,6 +15,8 @@
 #      Skew_Time + slack, well under the 3.6 s master-down.
 #   5. B's backend is healthy again: it preempts back.
 #   6. B's VIP is deleted: B sends priority 0 and releases; A takes over fast.
+#   7. A's VRRP is replaced while Master (priority 255, then 254, then 255):
+#      the old instance releases before the new one claims, so A keeps it.
 #
 # Run (needs a built binary; dev allows unprivileged user namespaces):
 #   cargo build --release --locked && tests/vrrp-netns.sh   # or: tests/vrrp-netns.sh <path to stormlb>
@@ -154,6 +156,21 @@ checks() {
     holds "$NB" vb && fail "$P: B kept the VIP after its VIP was deleted"
     [ "$ms" -lt 2500 ] || fail "$P: A took ${ms} ms: priority 0 should cut the wait to Skew_Time"
     pass "$P: B's VIP deleted: priority 0, released; A took the VIP in ${ms} ms"
+
+    # 7. A's VRRP is replaced while A is Master (#44, cb0db54fdbcc): at
+    #    priority 255 (the owner) the new instance starts Master and claims at
+    #    once, so an old instance still releasing would take the address away
+    #    from it. The new one waits for the old one; A keeps the VIP.
+    for prio in 255 254 255; do
+        api "$NA" PUT "$path" "$(spec va "$prio" 9109)" > /dev/null
+        [ "$(cat "$W/status")" = 200 ] || fail "$P A: replacing VRRP answered $(cat "$W/status"): $(cat "$W/resp")"
+        # 254 starts Backup and claims after master-down (about 3 s).
+        a_master() { api "$NA" GET "$path" | grep -q '"vrrp":"master"' && holds "$NA" va; }
+        within 6 a_master > /dev/null || fail "$P: A is not master holding the VIP after its VRRP was replaced (priority $prio)"
+        sleep 1.5
+        holds "$NA" va || fail "$P: the old VRRP instance released the VIP the new one (priority $prio) holds"
+    done
+    pass "$P: A's VRRP replaced three times while Master: the VIP stayed claimed"
 }
 
 VIP=10.9.0.100 FAM=4 PLEN=32
