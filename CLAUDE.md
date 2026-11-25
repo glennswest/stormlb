@@ -625,3 +625,4 @@ deliberate commit of its own.
     (RBAC) and rustkube#396 (routes/status 404). Then stormcos ships
     openshift-monitoring/prometheus-k8s (stormcos#1491) and the check
     `oc get route … -o jsonpath='{.status.ingress[0].host}'` holds.
+    Image golden-stormlb-dc4f4acb652e at 986cc9a (stormcos#1529); #48 closed.
