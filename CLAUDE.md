@@ -595,7 +595,7 @@ deliberate commit of its own.
   - Done in edb494b. sc-build passed there (job 940f266536, build VM):
     cargo build --locked + cargo test --locked, every test. Image
     requested, #46 closed.
-- [ ] #48 (P1) OpenShift Routes (route.openshift.io/v1) like HTTPRoutes,
+- [x] #48 (P1) OpenShift Routes (route.openshift.io/v1) like HTTPRoutes,
       status.ingress written (stormcos#1491: `oc adm top pvc` finds
       Prometheus through openshift-monitoring/prometheus-k8s).
   - [x] routes.rs: Routes into the same table: host (spec.host, else
@@ -616,4 +616,12 @@ deliberate commit of its own.
   - [x] Docs (README, design, deck, example), CHANGELOG.
   - [x] Filed rustkube#396 (routes/status is 404: CRD catch-all) and
         stormcos#1632 (85-stormlb.yaml: list routes, patch routes/status).
-  - [ ] sc-build, image, close #48.
+  - [x] sc-build, image, close #48.
+  - Done in bb3e7de (code), be10877 (docs). sc-build passed at bb3e7de
+    (release build, every test, clippy and cargo doc -D warnings, test
+    crate 12 + 3 harness) and at be10877 (81 unit incl. the 6 new,
+    tests/openshift_routes.rs ran twice, not skipped: openssl present;
+    clippy, doc). Not yet on a node: status.ingress needs stormcos#1632
+    (RBAC) and rustkube#396 (routes/status 404). Then stormcos ships
+    openshift-monitoring/prometheus-k8s (stormcos#1491) and the check
+    `oc get route … -o jsonpath='{.status.ingress[0].host}'` holds.
