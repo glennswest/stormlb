@@ -55,7 +55,12 @@ async fn fake_api(backend: SocketAddr) -> String {
             let body = body.clone();
             tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
-                let _ = s.read(&mut buf).await;
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                // No OpenShift Routes here (#48).
+                if String::from_utf8_lossy(&buf[..n]).contains("/route.openshift.io/") {
+                    let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+                    return;
+                }
                 let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
                 let _ = s.write_all(resp.as_bytes()).await;
             });
@@ -148,6 +153,7 @@ async fn the_router_terminates_tls_picks_certificates_by_sni_and_redirects() {
         backend_ca_file: None,
         ca_file: None,
         token_file: None,
+        route_domain: None,
     };
     tokio::spawn(router::run(cfg));
     // An empty answer while the router is still binding: `until` retries.

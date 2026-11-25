@@ -71,6 +71,11 @@ async fn fake_api(dir: &Path, backend: SocketAddr, state: Arc<Mutex<Api>>) -> St
                     }
                 }
                 let head = String::from_utf8_lossy(&head).to_string();
+                // No OpenShift Routes here (#48).
+                if head.contains("/route.openshift.io/") {
+                    let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+                    return;
+                }
                 let auth = head.lines().find_map(|l| {
                     let (k, v) = l.split_once(':')?;
                     k.eq_ignore_ascii_case("authorization").then(|| v.trim().to_string())
@@ -146,6 +151,7 @@ fn cfg(port: u16, api: &str, ca: &Path, token: &Path) -> RouterCfg {
         backend_ca_file: None,
         ca_file: Some(ca.to_str().unwrap().into()),
         token_file: Some(token.to_str().unwrap().into()),
+        route_domain: None,
     }
 }
 

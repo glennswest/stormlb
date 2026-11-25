@@ -110,6 +110,12 @@ pub struct RouterCfg {
     /// changes. Unset: an https backend's connections fail closed.
     #[serde(default)]
     pub backend_ca_file: Option<String>,
+    /// The domain an OpenShift Route without `spec.host` is served under, as
+    /// `<name>-<namespace>.<route_domain>` (#48). Unset: the domain of the
+    /// first wildcard name (`*.storm1.<zone>`) in a loaded `[router.tls]`
+    /// certificate; neither: such a Route is not admitted.
+    #[serde(default)]
+    pub route_domain: Option<String>,
 }
 
 /// The addresses `auto` resolves to: this node's, minus the ones that belong
@@ -199,13 +205,14 @@ pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
     info!(listen = %cfg.listen, apiserver = %cfg.apiserver, "router up");
 
     let upstream: Upstream = Arc::default();
-    tokio::spawn(poll_routes(cfg.clone(), table.clone(), upstream.clone()));
+    let certs = cfg.tls.as_ref().map(|t| tls::Certs::new(t.certs.clone()));
+    tokio::spawn(poll_routes(cfg.clone(), table.clone(), upstream.clone(), certs.clone()));
     let pool = Arc::new(Pool::default());
     tokio::spawn(Pool::reap(Arc::downgrade(&pool)));
 
     let mut redirect = None;
-    if let Some(t) = &cfg.tls {
-        let certs = tls::Certs::new(t.certs.clone());
+    let mut tls_port = None;
+    if let (Some(t), Some(certs)) = (&cfg.tls, certs) {
         if t.certs.is_empty() {
             warn!("[router.tls] lists no certs: the TLS listener completes no handshake");
         } else if certs.count() == 0 {
@@ -217,13 +224,14 @@ pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
         match bind_listeners(&t.listen).await {
             Ok(ls) => {
                 let acceptor = TlsAcceptor::from(tls::server_config(certs.clone()));
-                let front = Front { table: table.clone(), upstream: upstream.clone(), redirect: None, pool: pool.clone() };
+                let port = t.listen.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(443);
+                tls_port = Some(port);
+                let front = Front { table: table.clone(), upstream: upstream.clone(), redirect: None, pool: pool.clone(), tls_port };
                 for l in ls {
                     tokio::spawn(serve_tls_on(l, front.clone(), acceptor.clone()));
                 }
                 info!(listen = %t.listen, loaded = certs.count(), "router TLS up");
                 if t.redirect {
-                    let port = t.listen.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(443);
                     redirect = Some(Arc::new(Redirect { certs, port }));
                 }
             }
@@ -231,7 +239,7 @@ pub async fn run(cfg: RouterCfg) -> anyhow::Result<()> {
         }
     }
 
-    let front = Front { table, upstream, redirect, pool };
+    let front = Front { table, upstream, redirect, pool, tls_port };
     let first = plain.remove(0);
     // Everything after the first is served by its own task over the same
     // routes.
@@ -298,13 +306,22 @@ struct Front {
     upstream: Upstream,
     redirect: Option<Arc<Redirect>>,
     pool: Arc<Pool>,
+    /// The TLS listener's port, when there is one: where a Route with
+    /// `insecureEdgeTerminationPolicy: Redirect` sends plain-HTTP clients.
+    tls_port: Option<u16>,
 }
 
 impl Front {
     /// Plain HTTP, no redirect, over this table.
     #[cfg(test)]
     fn plain(table: Table) -> Front {
-        Front { table: Arc::new(std::sync::RwLock::new(Arc::new(table))), upstream: Arc::default(), redirect: None, pool: Arc::default() }
+        Front {
+            table: Arc::new(std::sync::RwLock::new(Arc::new(table))),
+            upstream: Arc::default(),
+            redirect: None,
+            pool: Arc::default(),
+            tls_port: None,
+        }
     }
 }
 
@@ -329,6 +346,17 @@ async fn serve_tls_on(listener: TcpListener, front: Front, acceptor: TlsAcceptor
         tokio::spawn(async move {
             metrics().inc("stormlb_router_connections_total", &[("listener", "https")]);
             let _active = metrics().active("stormlb_router_connections_active", &[("listener", "https")]);
+            // A passthrough Route (#48) is picked by SNI before anything is
+            // terminated: the ClientHello is peeked, not read.
+            let has_passthrough = front.table.read().unwrap().has_passthrough();
+            if has_passthrough {
+                if let Ok(Some(sni)) = tokio::time::timeout(Duration::from_secs(10), peek_sni(&conn)).await {
+                    let rule = front.table.read().unwrap().passthrough(&sni);
+                    if let Some(rule) = rule {
+                        return passthrough(conn, rule, &sni, peer).await;
+                    }
+                }
+            }
             let tls = match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(conn)).await {
                 Ok(Ok(s)) => s,
                 Ok(Err(e)) => {
@@ -343,6 +371,58 @@ async fn serve_tls_on(listener: TcpListener, front: Front, acceptor: TlsAcceptor
             serve_http(tls, front, true, peer).await;
         });
     }
+}
+
+/// The SNI name of the connection's ClientHello, peeked (None: not TLS, no
+/// name, or a hello too large to peek).
+async fn peek_sni(conn: &TcpStream) -> Option<String> {
+    let mut buf = vec![0u8; 5 + 16 * 1024];
+    loop {
+        let n = conn.peek(&mut buf).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        match tls::client_hello_sni(&buf[..n]) {
+            tls::Sni::Name(s) => return Some(s),
+            tls::Sni::Absent => return None,
+            tls::Sni::More if n == buf.len() => return None,
+            // peek returns what is there now: wait for the rest of the record.
+            tls::Sni::More => tokio::time::sleep(Duration::from_millis(5)).await,
+        }
+    }
+}
+
+/// Splice a TLS passthrough connection to an endpoint of its Route: the
+/// client's TLS goes to the backend untouched. A connection that fails moves
+/// to the next endpoint (up to [`TRIES`]); none reached closes the client's.
+async fn passthrough(mut conn: TcpStream, rule: Arc<Rule>, sni: &str, peer: SocketAddr) {
+    let backend = match rule.choose() {
+        Ok(b) => b,
+        Err((_, why)) => {
+            metrics().inc("stormlb_router_passthrough_connections_total", &[("host", sni), ("result", "no_backend")]);
+            return tracing::debug!(%peer, "passthrough {sni}: {why}");
+        }
+    };
+    let mut tried = Vec::new();
+    while tried.len() < TRIES {
+        let Some(ep) = backend.pick(&tried) else { break };
+        tried.push(ep.addr.clone());
+        match tokio::time::timeout(CONNECT, TcpStream::connect(&ep.addr)).await {
+            Ok(Ok(mut up)) => {
+                metrics().inc("stormlb_router_passthrough_connections_total", &[("host", sni), ("result", "ok")]);
+                let _ = (conn.set_nodelay(true), up.set_nodelay(true));
+                ep.active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = tokio::io::copy_bidirectional(&mut conn, &mut up).await;
+                ep.active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+            Ok(Err(e)) => tracing::debug!(%peer, "passthrough {sni} to {}: {e}", ep.addr),
+            Err(_) => tracing::debug!(%peer, "passthrough {sni} to {}: connect timed out", ep.addr),
+        }
+        ep.eject();
+        metrics().inc("stormlb_router_upstream_errors_total", &[("host", sni), ("kind", "connect")]);
+    }
+    metrics().inc("stormlb_router_passthrough_connections_total", &[("host", sni), ("result", "no_backend")]);
 }
 
 /// Accept and serve, on one listener.
@@ -466,10 +546,27 @@ async fn handle(req: Request<Incoming>, front: &Front, tls: bool, peer: SocketAd
     };
 
     // Plain HTTP goes to https once there is a certificate to serve it with,
-    // except the health probe, which stays on plain HTTP.
-    if let Some(r) = front.redirect.as_ref().filter(|r| !tls && r.certs.count() > 0) {
-        if path != "/healthz" {
-            let port = if r.port == 443 { String::new() } else { format!(":{}", r.port) };
+    // except the health probe, which stays on plain HTTP. A TLS Route says
+    // for itself (#48): Allow serves it, Redirect always redirects, None
+    // redirects when the router does and is refused otherwise.
+    if !tls {
+        let router = front.redirect.as_ref().filter(|r| r.certs.count() > 0).map(|r| r.port);
+        let insecure = match &lookup {
+            Lookup::Rule(rule, _) => rule.insecure,
+            _ => routes::Insecure::Router,
+        };
+        let to = match insecure {
+            routes::Insecure::Router => router.filter(|_| path != "/healthz"),
+            routes::Insecure::Allow => None,
+            routes::Insecure::Redirect => Some(router.or(front.tls_port).unwrap_or(443)),
+            routes::Insecure::Deny if router.is_some() => router,
+            routes::Insecure::Deny => {
+                record(&label, 404);
+                return text(404, format!("host {host} is served over https only\n"));
+            }
+        };
+        if let Some(to) = to {
+            let port = if to == 443 { String::new() } else { format!(":{to}") };
             let target = req.uri().path_and_query().map(|p| p.as_str()).filter(|t| t.starts_with('/')).unwrap_or("/");
             record(&label, 308);
             return Response::builder()
@@ -969,7 +1066,7 @@ async fn status_of<S: AsyncRead + AsyncWrite + Unpin>(mut s: S, req: &str) -> Op
 /// Refresh the table forever. Serves the last good table across errors.
 /// Each turn also re-reads `backend_ca_file` if it changed, and writes the
 /// routes' status where it changed.
-async fn poll_routes(cfg: RouterCfg, table: Shared, upstream: Upstream) {
+async fn poll_routes(cfg: RouterCfg, table: Shared, upstream: Upstream, certs: Option<Arc<tls::Certs>>) {
     let mut ca = CaState::default();
     let mut api = ApiClient::default();
     let mut known = Known::default();
@@ -977,6 +1074,11 @@ async fn poll_routes(cfg: RouterCfg, table: Shared, upstream: Upstream) {
     let mut identity_said = false;
     let mut status = StatusLog::default();
     let mut last_len = usize::MAX;
+    // The last Route list read, kept when a later read fails (#48), and the
+    // last thing said about it and about the route domain.
+    let mut os_routes: Vec<serde_json::Value> = Vec::new();
+    let mut os_said = None::<String>;
+    let mut domain_said = None::<Option<String>>;
     loop {
         if let Some(path) = &cfg.backend_ca_file {
             if let Some(c) = ca.reload(path) {
@@ -991,7 +1093,34 @@ async fn poll_routes(cfg: RouterCfg, table: Shared, upstream: Upstream) {
             (Err(e), _) | (_, Err(e)) => Err(e),
         };
         match fetched {
-            Ok((objs, client, token)) => {
+            Ok((mut objs, client, token)) => {
+                match objs.os_routes_error.take() {
+                    None => {
+                        if os_said.take().is_some() {
+                            info!("OpenShift Routes read again");
+                        }
+                        os_routes = std::mem::take(&mut objs.os_routes);
+                    }
+                    Some(e) => {
+                        if os_said.as_deref() != Some(e.as_str()) {
+                            warn!("OpenShift Routes not read, keeping the last {} (HTTPRoutes unaffected): {e}", os_routes.len());
+                            os_said = Some(e);
+                        }
+                    }
+                }
+                objs.os_routes = os_routes.clone();
+                objs.route_domain = cfg
+                    .route_domain
+                    .clone()
+                    .filter(|d| !d.trim().is_empty())
+                    .or_else(|| certs.as_ref().and_then(|c| c.wildcard_domain()));
+                if domain_said.as_ref() != Some(&objs.route_domain) && !objs.os_routes.is_empty() {
+                    match &objs.route_domain {
+                        Some(d) => info!("OpenShift Routes without spec.host are served under {d}"),
+                        None => warn!("no route domain ([router] route_domain, or a wildcard [router.tls] certificate): Routes without spec.host are not admitted"),
+                    }
+                    domain_said = Some(objs.route_domain.clone());
+                }
                 let (new, checks) = routes::build(&objs, &mut known);
                 for c in checks {
                     tokio::spawn(check_loop(c, upstream.clone()));
@@ -1042,13 +1171,8 @@ impl StatusLog {
     async fn write(&mut self, client: &reqwest::Client, api: &str, token: Option<&str>, t: &Table) {
         let now = routes::now_rfc3339();
         for r in &t.routes {
-            let key = format!("{}/{}", r.namespace, r.name);
-            let problems: Vec<String> = routes::conditions(r)
-                .into_iter()
-                .filter(|(ty, ok, ..)| (*ty == "PartiallyInvalid") == *ok && *ty != "storm.io/BackendsHealthy")
-                .map(|(ty, _, reason, msg)| format!("{ty} {reason}: {msg}"))
-                .collect();
-            let p = problems.join("; ");
+            let key = format!("{}/{}/{}", if r.os.is_some() { "Route" } else { "HTTPRoute" }, r.namespace, r.name);
+            let p = routes::problems(r);
             if self.problems.get(&key) != Some(&p) {
                 if !p.is_empty() {
                     warn!(route = %key, "{p}");
@@ -1058,12 +1182,20 @@ impl StatusLog {
             if self.refused.get(&key).is_some_and(|(_, at)| at.elapsed() < STATUS_BACKOFF) {
                 continue;
             }
-            let Some(parents) = routes::status_parents(r, &now) else { continue };
-            let url = format!(
-                "{api}/apis/gateway.networking.k8s.io/v1/namespaces/{}/httproutes/{}/status",
-                r.namespace, r.name
-            );
-            match api_merge_patch(client, &url, token, &serde_json::json!({"status": {"parents": parents}})).await {
+            let (url, body) = if r.os.is_some() {
+                let Some(ingress) = routes::route_ingress(r, &now) else { continue };
+                (
+                    format!("{api}/apis/{}/v1/namespaces/{}/routes/{}/status", routes::ROUTE_GROUP, r.namespace, r.name),
+                    serde_json::json!({"status": {"ingress": ingress}}),
+                )
+            } else {
+                let Some(parents) = routes::status_parents(r, &now) else { continue };
+                (
+                    format!("{api}/apis/gateway.networking.k8s.io/v1/namespaces/{}/httproutes/{}/status", r.namespace, r.name),
+                    serde_json::json!({"status": {"parents": parents}}),
+                )
+            };
+            match api_merge_patch(client, &url, token, &body).await {
                 Ok(()) => {
                     self.refused.remove(&key);
                 }
@@ -1076,7 +1208,11 @@ impl StatusLog {
                 }
             }
         }
-        let live: std::collections::HashSet<String> = t.routes.iter().map(|r| format!("{}/{}", r.namespace, r.name)).collect();
+        let live: std::collections::HashSet<String> = t
+            .routes
+            .iter()
+            .map(|r| format!("{}/{}/{}", if r.os.is_some() { "Route" } else { "HTTPRoute" }, r.namespace, r.name))
+            .collect();
         self.problems.retain(|k, _| live.contains(k));
         self.refused.retain(|k, _| live.contains(k));
     }
@@ -1202,10 +1338,20 @@ async fn fetch_objects(client: &reqwest::Client, api: &str, token: Option<&str>)
         .await?
         .ok_or_else(|| anyhow::anyhow!("the apiserver serves no HTTPRoutes (404)"))?;
     let mut o = routes::Objects { routes: list["items"].as_array().cloned().unwrap_or_default(), ..Default::default() };
+    // OpenShift Routes (#48): an apiserver that serves none is not an error,
+    // and one that refuses them (no RBAC for them yet) must not stop the
+    // HTTPRoutes: the poll keeps the last list read.
+    match api_list(client, &format!("{api}/apis/{}/v1/routes", routes::ROUTE_GROUP), token).await {
+        Ok(Some(l)) => o.os_routes = l["items"].as_array().cloned().unwrap_or_default(),
+        Ok(None) => {}
+        Err(e) => o.os_routes_error = Some(format!("{e:#}")),
+    }
     let needs_backends = o.routes.iter().any(|r| {
         r["metadata"]["annotations"]["storm.io/backend"].is_null()
             && r["spec"]["rules"].as_array().into_iter().flatten().any(|rule| rule["backendRefs"].as_array().is_some_and(|b| !b.is_empty()))
-    });
+    }) || o.os_routes.iter().any(|r| r["metadata"]["annotations"]["storm.io/backend"].is_null())
+        // The last Route list stands in for this one: its backends are needed.
+        || o.os_routes_error.is_some();
     if !needs_backends {
         return Ok(o);
     }
@@ -1260,7 +1406,8 @@ async fn api_list(client: &reqwest::Client, url: &str, token: Option<&str>) -> a
         let who = if token.is_some() { "the router's token (token_file)" } else { "anonymous (no [router] token_file)" };
         anyhow::bail!(
             "{status} for {url}: {who} may not read it — the router needs list on httproutes, services, \
-             endpoints, endpointslices and referencegrants, and patch on httproutes/status (stormlb#9, #37, #42)"
+             endpoints, endpointslices, referencegrants and routes (route.openshift.io), and patch on \
+             httproutes/status and routes/status (stormlb#9, #37, #42, #48)"
         );
     }
     Ok(Some(resp.error_for_status()?.json().await?))

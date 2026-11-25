@@ -595,3 +595,25 @@ deliberate commit of its own.
   - Done in edb494b. sc-build passed there (job 940f266536, build VM):
     cargo build --locked + cargo test --locked, every test. Image
     requested, #46 closed.
+- [ ] #48 (P1) OpenShift Routes (route.openshift.io/v1) like HTTPRoutes,
+      status.ingress written (stormcos#1491: `oc adm top pvc` finds
+      Prometheus through openshift-monitoring/prometheus-k8s).
+  - [x] routes.rs: Routes into the same table: host (spec.host, else
+        `<name>-<ns>.<route_domain>`, the domain from `[router] route_domain`
+        or the router certificate's wildcard), path prefix, to +
+        alternateBackends (weight 100), port.targetPort, storm.io/backend,
+        haproxy timeout annotation, wildcardPolicy Subdomain; oldest Route
+        holds a host (namespace) and host+path (HostAlreadyClaimed).
+  - [x] TLS: edge/reencrypt terminate with the router's certificate
+        (reencrypt dials https for `<svc>.<ns>.svc` against backend_ca_file),
+        passthrough by peeked SNI and spliced; insecureEdgeTerminationPolicy
+        Allow/Redirect/None on :80.
+  - [x] status.ingress (routerName stormlb, Admitted) via routes/status,
+        only on change; a refused Routes list keeps the last one (HTTPRoutes
+        unaffected).
+  - [x] Unit tests (routes, SNI parser), tests/openshift_routes.rs end to
+        end (status, edge, redirect/allow/deny, reencrypt, passthrough).
+  - [ ] Docs (README, design, deck, example), CHANGELOG.
+  - [ ] File: rustkube (routes/status is 404: falls to the CRD catch-all),
+        stormcos (85-stormlb.yaml: list routes, patch routes/status).
+  - [ ] sc-build, image, close #48.

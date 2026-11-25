@@ -152,6 +152,19 @@ impl Certs {
         loaded.iter().flatten().next().map(|l| l.key.clone())
     }
 
+    /// The domain under the first wildcard DNS name of the loaded
+    /// certificates, in order (`*.storm1.g8.lo` → `storm1.g8.lo`): where an
+    /// OpenShift Route without a host is served when `[router] route_domain`
+    /// is unset (#48).
+    pub fn wildcard_domain(&self) -> Option<String> {
+        let loaded = self.loaded.read().unwrap();
+        loaded.iter().flatten().find_map(|l| {
+            let c = webpki::EndEntityCert::try_from(&l.leaf).ok()?;
+            let d = c.valid_dns_names().find_map(|n| n.strip_prefix("*.").map(str::to_ascii_lowercase));
+            d
+        })
+    }
+
     /// Re-check the files every `secs`, forever.
     pub async fn reload_every(self: Arc<Self>, secs: u64) {
         loop {
@@ -192,4 +205,124 @@ fn load(p: &CertPair) -> anyhow::Result<(CertificateDer<'static>, Arc<CertifiedK
     ck.keys_match().map_err(|e| anyhow::anyhow!("{} does not belong to {}: {e}", p.key_file, p.cert_file))?;
     webpki::EndEntityCert::try_from(&leaf).map_err(|e| anyhow::anyhow!("{}: {e}", p.cert_file))?;
     Ok((leaf, Arc::new(ck)))
+}
+
+/// What the first bytes of a TLS connection say about its SNI name.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Sni {
+    /// The ClientHello's `server_name` (lowercased).
+    Name(String),
+    /// Not a ClientHello this can read, or one without a name.
+    Absent,
+    /// The ClientHello's first record is not all here yet.
+    More,
+}
+
+/// The SNI name in a ClientHello, read from bytes peeked off the socket
+/// (nothing is consumed), so a passthrough route can be picked before
+/// deciding whether to terminate (#48). Only a ClientHello whose handshake
+/// message fits in its first record is read (any real client's does).
+pub fn client_hello_sni(b: &[u8]) -> Sni {
+    if b.len() < 5 {
+        return Sni::More;
+    }
+    if b[0] != 0x16 {
+        return Sni::Absent;
+    }
+    let len = u16::from_be_bytes([b[3], b[4]]) as usize;
+    if b.len() < 5 + len {
+        return Sni::More;
+    }
+    match parse_hello(&b[5..5 + len]) {
+        Some(n) => Sni::Name(n),
+        None => Sni::Absent,
+    }
+}
+
+fn parse_hello(rec: &[u8]) -> Option<String> {
+    struct Cur<'a>(&'a [u8]);
+    impl<'a> Cur<'a> {
+        fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+            if self.0.len() < n {
+                return None;
+            }
+            let (a, b) = self.0.split_at(n);
+            self.0 = b;
+            Some(a)
+        }
+        fn u8(&mut self) -> Option<usize> {
+            Some(self.take(1)?[0] as usize)
+        }
+        fn u16(&mut self) -> Option<usize> {
+            let b = self.take(2)?;
+            Some(u16::from_be_bytes([b[0], b[1]]) as usize)
+        }
+    }
+    let mut c = Cur(rec);
+    if c.u8()? != 1 {
+        return None; // not a ClientHello
+    }
+    let hl = c.take(3)?;
+    let hlen = ((hl[0] as usize) << 16) | ((hl[1] as usize) << 8) | (hl[2] as usize);
+    let mut h = Cur(c.take(hlen)?);
+    h.take(2 + 32)?; // version, random
+    let n = h.u8()?;
+    h.take(n)?; // session id
+    let n = h.u16()?;
+    h.take(n)?; // cipher suites
+    let n = h.u8()?;
+    h.take(n)?; // compression methods
+    let n = h.u16()?;
+    let mut ext = Cur(h.take(n)?);
+    while !ext.0.is_empty() {
+        let ty = ext.u16()?;
+        let n = ext.u16()?;
+        let data = ext.take(n)?;
+        if ty != 0 {
+            continue;
+        }
+        let mut list = Cur(data);
+        let n = list.u16()?;
+        let mut names = Cur(list.take(n)?);
+        while !names.0.is_empty() {
+            let kind = names.u8()?;
+            let n = names.u16()?;
+            let name = names.take(n)?;
+            if kind == 0 {
+                return std::str::from_utf8(name).ok().map(str::to_ascii_lowercase);
+            }
+        }
+        return None;
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_rustls::rustls::{ClientConfig, ClientConnection, RootCertStore};
+
+    fn hello(name: &str) -> Vec<u8> {
+        let cfg = ClientConfig::builder().with_root_certificates(RootCertStore::empty()).with_no_client_auth();
+        let mut c = ClientConnection::new(Arc::new(cfg), ServerName::try_from(name.to_string()).unwrap()).unwrap();
+        let mut out = Vec::new();
+        c.write_tls(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn the_sni_name_is_read_from_a_real_client_hello() {
+        let b = hello("Prometheus-K8S.storm1.g8.lo");
+        assert_eq!(client_hello_sni(&b), Sni::Name("prometheus-k8s.storm1.g8.lo".into()));
+        // Every prefix is "more", never a wrong answer.
+        for n in 0..b.len() {
+            assert_eq!(client_hello_sni(&b[..n]), Sni::More, "{n} of {}", b.len());
+        }
+        // An IP address is never sent as SNI.
+        assert_eq!(client_hello_sni(&hello("127.0.0.1")), Sni::Absent);
+        assert_eq!(client_hello_sni(b"GET / HTTP/1.1\r\n\r\n"), Sni::Absent);
+        let mut bad = b.clone();
+        bad[5] = 2; // a ServerHello
+        assert_eq!(client_hello_sni(&bad), Sni::Absent);
+    }
 }

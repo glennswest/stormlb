@@ -40,6 +40,32 @@
 //! What a rule cannot do here is refused, not ignored: a rule with `filters`,
 //! a `RegularExpression` match or `sessionPersistence` is dropped and the
 //! route says so in its status (`PartiallyInvalid`, or `Accepted: False`).
+//!
+//! **OpenShift Routes** (`route.openshift.io/v1`, #48) go into the same
+//! table, one rule each:
+//!
+//! - **Host**: `spec.host`, or when it is empty `<name>-<namespace>.<domain>`
+//!   (as OpenShift's router defaults it), the domain being `[router]
+//!   route_domain` or else the wildcard the router's certificate carries.
+//!   `wildcardPolicy: Subdomain` serves `*.<host minus its first label>`.
+//!   A host belongs to the namespace of its oldest Route, and a host + path
+//!   to its oldest Route: a later one is not admitted (`HostAlreadyClaimed`).
+//! - **Path**: `spec.path` is a prefix (element-wise, as above).
+//! - **Backends**: `spec.to` and `spec.alternateBackends` (Services in the
+//!   route's namespace, `weight` default 100), on the Service port that
+//!   `spec.port.targetPort` names (a port name, or a target port number;
+//!   unset: the first port); or `storm.io/backend` as for HTTPRoutes. The
+//!   annotation `haproxy.router.openshift.io/timeout` is the request timeout.
+//! - **TLS**: `edge` and `reencrypt` terminate with the router's own
+//!   certificate (`[router.tls]`); `reencrypt` then dials the backend over
+//!   TLS, verified against `backend_ca_file` for `<service>.<namespace>.svc`
+//!   (or `storm.io/backend-server-name`); `passthrough` is routed by SNI
+//!   without terminating. On plain HTTP a TLS route follows its
+//!   `insecureEdgeTerminationPolicy`: `Allow` serves it, `Redirect` sends
+//!   clients to https, `None` (the default) sends them to https when the
+//!   router redirects anyway and otherwise answers 404.
+//! - **Status**: `status.ingress[]` gets this router's entry (`routerName:
+//!   stormlb`, `Admitted`), others' entries are kept.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -56,6 +82,27 @@ pub const GATEWAY_GROUP: &str = "gateway.networking.k8s.io";
 
 /// The controller name in an HTTPRoute's `status.parents`.
 pub const CONTROLLER: &str = "storm.io/stormlb";
+
+/// The router's name in an OpenShift Route's `status.ingress`.
+pub const ROUTER_NAME: &str = "stormlb";
+
+/// The OpenShift Route group.
+pub const ROUTE_GROUP: &str = "route.openshift.io";
+
+/// What plain HTTP does with a rule's requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Insecure {
+    /// The router's policy (`[router.tls] redirect`): HTTPRoutes and plain
+    /// Routes.
+    Router,
+    /// Served on plain HTTP too (`insecureEdgeTerminationPolicy: Allow`).
+    Allow,
+    /// Always sent to https (`Redirect`).
+    Redirect,
+    /// https only (`None`): sent to https when the router redirects anyway,
+    /// otherwise 404.
+    Deny,
+}
 
 // ---------------------------------------------------------------- matching
 
@@ -330,6 +377,8 @@ pub struct Rule {
     /// `timeouts.backendRequest`: per attempt.
     pub backend_timeout: Option<Duration>,
     pub retry: Retry,
+    /// What plain HTTP does with its requests.
+    pub insecure: Insecure,
     wrr: Mutex<Vec<i64>>,
 }
 
@@ -339,7 +388,16 @@ pub type NoBackend = (u16, String);
 impl Rule {
     pub fn new(route: String, index: usize, backends: Vec<Arc<Backend>>) -> Self {
         let n = backends.len();
-        Self { route, index, backends, timeout: None, backend_timeout: None, retry: Retry::default(), wrr: Mutex::new(vec![0; n]) }
+        Self {
+            route,
+            index,
+            backends,
+            timeout: None,
+            backend_timeout: None,
+            retry: Retry::default(),
+            insecure: Insecure::Router,
+            wrr: Mutex::new(vec![0; n]),
+        }
     }
 
     /// The backend for the next request: smooth weighted round-robin over
@@ -401,6 +459,26 @@ pub struct RouteInfo {
     pub dropped: Vec<String>,
     /// The route's current `status.parents` as read.
     pub parents: Value,
+    /// Set for an OpenShift Route (None: an HTTPRoute).
+    pub os: Option<OsRoute>,
+}
+
+/// What an OpenShift Route adds to its [`RouteInfo`]. For a Route,
+/// `dropped` holds what it asks for that is not done (its own certificate,
+/// say), said in the `Admitted` message.
+#[derive(Debug)]
+pub struct OsRoute {
+    /// The host it is served on (`spec.host` or the default); empty when it
+    /// has none.
+    pub host: String,
+    /// `wildcardPolicy: Subdomain`.
+    pub subdomain: bool,
+    /// `spec.tls.termination`, lowercased.
+    pub termination: Option<String>,
+    /// Why it is not admitted: (reason, message).
+    pub rejected: Option<(String, String)>,
+    /// Its current `status.ingress` as read.
+    pub ingress: Value,
 }
 
 /// The route table.
@@ -408,13 +486,25 @@ pub struct RouteInfo {
 pub struct Table {
     exact: HashMap<String, Vec<Entry>>,
     wildcard: HashMap<String, Vec<Entry>>,
+    /// TLS passthrough Routes: SNI host → its rule.
+    passthrough: HashMap<String, Arc<Rule>>,
     pub routes: Vec<RouteInfo>,
 }
 
 impl Table {
     /// Hostnames in the table.
     pub fn hosts(&self) -> usize {
-        self.exact.len() + self.wildcard.len()
+        self.exact.len() + self.wildcard.len() + self.passthrough.len()
+    }
+
+    /// Whether any Route is TLS passthrough (only then is SNI peeked).
+    pub fn has_passthrough(&self) -> bool {
+        !self.passthrough.is_empty()
+    }
+
+    /// The passthrough rule for a TLS client's SNI name, if any.
+    pub fn passthrough(&self, sni: &str) -> Option<Arc<Rule>> {
+        self.passthrough.get(&sni.to_ascii_lowercase()).cloned()
     }
 
     pub fn lookup(&self, host: &str, r: &ReqView) -> Lookup {
@@ -448,7 +538,8 @@ impl Table {
             .routes
             .iter()
             .map(|r| {
-                json!({
+                let mut v = json!({
+                    "kind": if r.os.is_some() { "Route" } else { "HTTPRoute" },
                     "namespace": r.namespace,
                     "name": r.name,
                     "hostnames": r.hostnames,
@@ -460,7 +551,17 @@ impl Table {
                         "retry": {"attempts": rule.retry.attempts, "codes": rule.retry.codes, "backoff_ms": rule.retry.backoff.as_millis() as u64},
                         "backends": rule.backends.iter().map(backend_view).collect::<Vec<_>>(),
                     })).collect::<Vec<_>>(),
-                })
+                });
+                if let Some(os) = &r.os {
+                    v["host"] = json!(os.host);
+                    v["termination"] = json!(os.termination);
+                    v["admitted"] = json!(os.rejected.is_none());
+                    if let Some((reason, msg)) = &os.rejected {
+                        v["reason"] = json!(reason);
+                        v["message"] = json!(msg);
+                    }
+                }
+                v
             })
             .collect();
         json!({ "routes": routes })
@@ -511,6 +612,13 @@ pub struct Objects {
     /// Why ReferenceGrants could not be read (every cross-namespace ref is
     /// then refused).
     pub grants_error: Option<String>,
+    /// OpenShift Routes (`route.openshift.io/v1`).
+    pub os_routes: Vec<Value>,
+    /// Why Routes could not be read this time (the router then keeps the
+    /// last list it read).
+    pub os_routes_error: Option<String>,
+    /// The domain a Route without `spec.host` is served under.
+    pub route_domain: Option<String>,
 }
 
 impl Objects {
@@ -620,6 +728,7 @@ pub fn build(objs: &Objects, known: &mut Known) -> (Table, Vec<NewCheck>) {
             rules: Vec::new(),
             dropped: Vec::new(),
             parents: r["status"]["parents"].clone(),
+            os: None,
         };
         let proto = match proto_of(r) {
             Ok(p) => p,
@@ -663,6 +772,24 @@ pub fn build(objs: &Objects, known: &mut Known) -> (Table, Vec<NewCheck>) {
                 for h in &hostnames {
                     entries.push((h.clone(), m.clone(), rule.clone(), (created.clone(), route_key.clone(), mi, j)));
                 }
+            }
+        }
+        table.routes.push(info);
+    }
+
+    // OpenShift Routes, oldest first: the oldest claims a host.
+    let mut os: Vec<&Value> = objs.os_routes.iter().collect();
+    os.sort_by_key(|r| (r["metadata"]["creationTimestamp"].as_str().unwrap_or("").to_string(), key_of(r)));
+    let mut claims = Claims::default();
+    for r in os {
+        let mut ctx = Ctx { objs, known: &mut *known, fresh: &mut fresh, checks: &mut checks };
+        let (info, served) = os_route(&mut ctx, r, &mut claims);
+        if let Some(s) = served {
+            if s.passthrough {
+                table.passthrough.insert(s.hostname, s.rule);
+            } else {
+                let created = r["metadata"]["creationTimestamp"].as_str().unwrap_or("").to_string();
+                entries.push((s.hostname, s.m, s.rule, (created, format!("{}/{}", info.namespace, info.name), 0, 0)));
             }
         }
         table.routes.push(info);
@@ -866,6 +993,303 @@ fn resolve(
     b.balance = balance;
     b.check = check;
     b
+}
+
+// ------------------------------------------------------- OpenShift Routes
+
+/// What one build carries while it resolves backends.
+struct Ctx<'a> {
+    objs: &'a Objects,
+    known: &'a mut Known,
+    fresh: &'a mut Vec<Arc<Endpoint>>,
+    checks: &'a mut Vec<NewCheck>,
+}
+
+/// Which Route holds each host (its namespace) and each host + path.
+#[derive(Default)]
+struct Claims {
+    hosts: HashMap<String, (String, String)>,
+    paths: HashMap<(String, String), String>,
+}
+
+impl Claims {
+    fn claim(&mut self, host: &str, path: &str, ns: &str, key: &str) -> Result<(), Reject> {
+        if let Some((owner_ns, owner)) = self.hosts.get(host) {
+            if owner_ns != ns {
+                return Err(("HostAlreadyClaimed".into(), format!("host {host} is held by the older route {owner} in another namespace")));
+            }
+        }
+        if let Some(owner) = self.paths.get(&(host.to_string(), path.to_string())) {
+            return Err(("HostAlreadyClaimed".into(), format!("host {host} path {path:?} is held by the older route {owner}")));
+        }
+        self.hosts.entry(host.to_string()).or_insert_with(|| (ns.to_string(), key.to_string()));
+        self.paths.insert((host.to_string(), path.to_string()), key.to_string());
+        Ok(())
+    }
+}
+
+/// Why a Route is not admitted: (reason, message).
+type Reject = (String, String);
+
+/// What an admitted Route serves.
+struct Served {
+    /// Its host, or `*.<suffix>` for `wildcardPolicy: Subdomain`.
+    hostname: String,
+    m: Match,
+    rule: Arc<Rule>,
+    passthrough: bool,
+}
+
+fn invalid(msg: String) -> Reject {
+    ("ExtendedValidationFailed".into(), msg)
+}
+
+/// One OpenShift Route: what it says (for status and the API), and what it
+/// serves when admitted.
+fn os_route(ctx: &mut Ctx, r: &Value, claims: &mut Claims) -> (RouteInfo, Option<Served>) {
+    let ns = r["metadata"]["namespace"].as_str().unwrap_or("default").to_string();
+    let name = r["metadata"]["name"].as_str().unwrap_or("").to_string();
+    let spec = &r["spec"];
+    let host = match spec["host"].as_str().map(str::trim).filter(|h| !h.is_empty()) {
+        Some(h) => Some(h.to_ascii_lowercase()),
+        None => ctx.objs.route_domain.as_ref().map(|d| format!("{name}-{ns}.{}", d.trim_start_matches('.'))),
+    };
+    let termination = spec["tls"]["termination"].as_str().map(str::to_ascii_lowercase);
+    let mut info = RouteInfo {
+        namespace: ns.clone(),
+        name: name.clone(),
+        generation: r["metadata"]["generation"].as_i64().unwrap_or(0),
+        hostnames: Vec::new(),
+        rules: Vec::new(),
+        dropped: Vec::new(),
+        parents: Value::Null,
+        os: Some(OsRoute {
+            host: host.clone().unwrap_or_default(),
+            subdomain: spec["wildcardPolicy"].as_str() == Some("Subdomain"),
+            termination: termination.clone(),
+            rejected: None,
+            ingress: r["status"]["ingress"].clone(),
+        }),
+    };
+    let served = match host {
+        None => Err((
+            "NoHost".into(),
+            "spec.host is empty and the router has no domain to default it under ([router] route_domain, or a wildcard certificate in [router.tls])".into(),
+        )),
+        Some(h) => os_serve(ctx, r, &ns, &h, termination.as_deref(), claims, &mut info.dropped),
+    };
+    match served {
+        Ok(s) => {
+            info.hostnames = vec![s.hostname.clone()];
+            info.rules.push(s.rule.clone());
+            (info, Some(s))
+        }
+        Err(why) => {
+            info.os.as_mut().expect("a Route").rejected = Some(why);
+            (info, None)
+        }
+    }
+}
+
+fn os_serve(
+    ctx: &mut Ctx,
+    r: &Value,
+    ns: &str,
+    host: &str,
+    termination: Option<&str>,
+    claims: &mut Claims,
+    notes: &mut Vec<String>,
+) -> Result<Served, Reject> {
+    let spec = &r["spec"];
+    let key = format!("{ns}/{}", r["metadata"]["name"].as_str().unwrap_or(""));
+    let annotations = &r["metadata"]["annotations"];
+    let path = spec["path"].as_str().unwrap_or("").to_string();
+    if !path.is_empty() && !path.starts_with('/') {
+        return Err(invalid(format!("spec.path {path:?} must start with /")));
+    }
+    if bad_host(host) {
+        return Err(invalid(format!("host {host:?} is not a DNS name")));
+    }
+    let passthrough = termination == Some("passthrough");
+    let reencrypt = termination == Some("reencrypt");
+    if !matches!(termination, None | Some("edge") | Some("reencrypt") | Some("passthrough")) {
+        return Err(invalid(format!("spec.tls.termination {:?}: want edge, reencrypt or passthrough", termination.unwrap_or(""))));
+    }
+    if passthrough && !path.is_empty() {
+        return Err(invalid("a passthrough route cannot have a path: the router does not see the request".into()));
+    }
+    let subdomain = match spec["wildcardPolicy"].as_str() {
+        None | Some("") | Some("None") => false,
+        Some("Subdomain") if passthrough => return Err(invalid("wildcardPolicy Subdomain is not supported with passthrough".into())),
+        Some("Subdomain") => true,
+        Some(w) => return Err(invalid(format!("wildcardPolicy {w:?}: want None or Subdomain"))),
+    };
+    let insecure = match (termination, spec["tls"]["insecureEdgeTerminationPolicy"].as_str().unwrap_or("")) {
+        (None, _) => Insecure::Router,
+        (_, "" | "None") => Insecure::Deny,
+        (_, "Redirect") => Insecure::Redirect,
+        (Some("edge" | "reencrypt"), "Allow") => Insecure::Allow,
+        (Some(t), p) => return Err(invalid(format!("insecureEdgeTerminationPolicy {p:?} is not valid for {t}"))),
+    };
+    let own = |k: &str| spec["tls"][k].as_str().is_some_and(|v| !v.trim().is_empty());
+    if own("certificate") || own("key") {
+        notes.push("spec.tls.certificate is not used: the router serves its own certificate".into());
+    }
+    if reencrypt && own("destinationCACertificate") {
+        notes.push("spec.tls.destinationCACertificate is not used: backends are verified against [router] backend_ca_file".into());
+    }
+    let timeout = match annotations["haproxy.router.openshift.io/timeout"].as_str() {
+        None => None,
+        Some(s) => match parse_duration(s.trim()) {
+            Some(d) if d.is_zero() => None,
+            Some(d) => Some(d),
+            None => return Err(invalid(format!("haproxy.router.openshift.io/timeout {s:?} is not a duration"))),
+        },
+    };
+    let hostname = if subdomain {
+        match host.split_once('.') {
+            Some((_, rest)) if rest.contains('.') => format!("*.{rest}"),
+            _ => return Err(invalid(format!("wildcardPolicy Subdomain needs a host below a domain, not {host:?}"))),
+        }
+    } else {
+        host.to_string()
+    };
+    claims.claim(&hostname, &path, ns, &key)?;
+
+    // The protocol to a backend: TLS for reencrypt (named for the Service,
+    // as OpenShift's service-serving certificates are), else as annotated.
+    let server_name = annotations["storm.io/backend-server-name"].as_str().map(str::to_string);
+    let proto_for = |svc: Option<&str>| -> Result<Proto, Reject> {
+        if reencrypt {
+            return Ok(Proto::Https(server_name.clone().or_else(|| svc.map(|s| format!("{s}.{ns}.svc")))));
+        }
+        proto_of(r).map_err(invalid)
+    };
+    let mut backends = Vec::new();
+    if let Some(addr) = annotations["storm.io/backend"].as_str() {
+        let proto = proto_for(None)?;
+        let (ep, _) = ctx.known.get(format!("{key}|route|static|{addr}|{proto:?}"), addr, true, ctx.fresh);
+        backends.push(Arc::new(Backend::new(addr.to_string(), 1, proto, Ok(vec![ep]))));
+    } else {
+        let mut targets = vec![&spec["to"]];
+        targets.extend(spec["alternateBackends"].as_array().into_iter().flatten());
+        for t in targets {
+            let svc = t["name"].as_str().unwrap_or("");
+            let weight = t["weight"].as_u64().unwrap_or(100).min(256);
+            let proto = proto_for(Some(svc))?;
+            let kind = t["kind"].as_str().unwrap_or("Service");
+            let b = if kind != "Service" {
+                Backend::new(format!("{ns}/{svc}"), weight as u32, proto, Err(format!("InvalidKind: {kind} (only Services)")))
+            } else {
+                match route_port(ctx.objs, ns, svc, &spec["port"]["targetPort"]) {
+                    Ok(port) => {
+                        let bref = json!({"name": svc, "port": port, "weight": weight});
+                        resolve(ctx.objs, ctx.known, ctx.fresh, ctx.checks, ns, &format!("{key}|route"), &bref, &proto)
+                    }
+                    Err(e) => Backend::new(format!("{ns}/{svc}"), weight as u32, proto, Err(e)),
+                }
+            };
+            backends.push(Arc::new(b));
+        }
+    }
+    let mut rule = Rule::new(key, 0, backends);
+    rule.timeout = timeout;
+    rule.insecure = insecure;
+    let p = if path.is_empty() { "/".to_string() } else { path };
+    Ok(Served { hostname, m: Match { path: PathMatch::Prefix(p), method: None, headers: vec![], query: vec![] }, rule: Arc::new(rule), passthrough })
+}
+
+/// A host no client could ask for: not a DNS name.
+fn bad_host(host: &str) -> bool {
+    host.len() > 253
+        || host.split('.').any(|l| l.is_empty() || l.len() > 63)
+        || !host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+}
+
+/// The Service port a Route's `spec.port.targetPort` names: a port name, a
+/// target port (name or number), or a port number; unset, the first port.
+/// A Service that does not exist resolves later, saying so.
+fn route_port(objs: &Objects, ns: &str, svc: &str, target: &Value) -> Result<u64, String> {
+    let Some(s) = objs.services.get(&format!("{ns}/{svc}")) else { return Ok(80) };
+    let ports: Vec<&Value> = s["spec"]["ports"].as_array().into_iter().flatten().collect();
+    let target_num = |p: &Value| p["targetPort"].as_u64().or_else(|| p["targetPort"].as_str().and_then(|t| t.parse().ok())).or(p["port"].as_u64());
+    let found = match target {
+        Value::Null => ports.first().copied(),
+        Value::String(t) if t.is_empty() => ports.first().copied(),
+        Value::String(t) => match t.parse::<u64>() {
+            Ok(n) => ports.iter().find(|p| target_num(p) == Some(n)).or_else(|| ports.iter().find(|p| p["port"].as_u64() == Some(n))).copied(),
+            Err(_) => ports
+                .iter()
+                .find(|p| p["name"].as_str() == Some(t))
+                .or_else(|| ports.iter().find(|p| p["targetPort"].as_str() == Some(t)))
+                .copied(),
+        },
+        Value::Number(n) => {
+            let n = n.as_u64();
+            ports.iter().find(|p| target_num(p) == n).or_else(|| ports.iter().find(|p| p["port"].as_u64() == n)).copied()
+        }
+        _ => None,
+    };
+    found
+        .and_then(|p| p["port"].as_u64())
+        .ok_or_else(|| format!("BackendNotFound: Service {ns}/{svc} has no port for targetPort {target}"))
+}
+
+/// The Route's new `status.ingress`, or None when this router's entry is
+/// already what it says. Others' entries are kept as they are.
+pub fn route_ingress(r: &RouteInfo, now: &str) -> Option<Value> {
+    let os = r.os.as_ref()?;
+    let old = os.ingress.as_array().cloned().unwrap_or_default();
+    let mine = old.iter().find(|i| i["routerName"].as_str() == Some(ROUTER_NAME));
+    let (status, reason, message) = match &os.rejected {
+        None => ("True", None, Some(r.dropped.join("; ")).filter(|m| !m.is_empty())),
+        Some((reason, msg)) => ("False", Some(reason.clone()), Some(msg.clone())),
+    };
+    let since = mine
+        .and_then(|m| m["conditions"].as_array())
+        .into_iter()
+        .flatten()
+        .find(|c| c["type"].as_str() == Some("Admitted") && c["status"].as_str() == Some(status))
+        .and_then(|c| c["lastTransitionTime"].as_str())
+        .unwrap_or(now);
+    let mut cond = json!({"type": "Admitted", "status": status, "lastTransitionTime": since});
+    if let Some(x) = reason {
+        cond["reason"] = json!(x);
+    }
+    if let Some(x) = message {
+        cond["message"] = json!(x);
+    }
+    let entry = json!({
+        "host": os.host,
+        "routerName": ROUTER_NAME,
+        "wildcardPolicy": if os.subdomain { "Subdomain" } else { "None" },
+        "conditions": [cond],
+    });
+    if mine == Some(&entry) {
+        return None;
+    }
+    let mut ingress: Vec<Value> = old.into_iter().filter(|i| i["routerName"].as_str() != Some(ROUTER_NAME)).collect();
+    ingress.push(entry);
+    Some(Value::Array(ingress))
+}
+
+/// What is wrong with a route, for the log ("" when nothing): an HTTPRoute's
+/// failing conditions, a Route's admission and unresolved backends.
+pub fn problems(r: &RouteInfo) -> String {
+    let mut out: Vec<String> = Vec::new();
+    if let Some((reason, msg)) = r.os.as_ref().and_then(|o| o.rejected.as_ref()) {
+        out.push(format!("Admitted False {reason}: {msg}"));
+    }
+    for (ty, ok, reason, msg) in conditions(r) {
+        let bad = (ty == "PartiallyInvalid") == ok && ty != "storm.io/BackendsHealthy";
+        if bad && (r.os.is_none() || ty == "ResolvedRefs") {
+            out.push(format!("{ty} {reason}: {msg}"));
+        }
+    }
+    if r.os.as_ref().is_some_and(|o| o.rejected.is_none()) && !r.dropped.is_empty() {
+        out.push(r.dropped.join("; "));
+    }
+    out.join("; ")
 }
 
 /// Whether a route (without `storm.io/backend`) has a backendRef in a
@@ -1346,5 +1770,167 @@ mod tests {
         assert_eq!(e.record_check(true, &spec), None);
         assert_eq!(e.record_check(true, &spec), Some(true));
         assert!(e.healthy());
+    }
+
+    fn os_objects(routes: Vec<Value>) -> Objects {
+        let mut o = Objects { route_domain: Some("storm1.g8.lo".into()), os_routes: routes, ..Default::default() };
+        o.services.insert(
+            "openshift-monitoring/prometheus-k8s".into(),
+            json!({"metadata": {"namespace": "openshift-monitoring", "name": "prometheus-k8s"},
+                "spec": {"clusterIP": "10.96.0.20", "ports": [{"name": "web", "port": 9091, "targetPort": "web"}, {"name": "metrics", "port": 9092, "targetPort": 9192}]}}),
+        );
+        o.services.insert(
+            "openshift-monitoring/thanos".into(),
+            json!({"metadata": {"namespace": "openshift-monitoring", "name": "thanos"},
+                "spec": {"clusterIP": "10.96.0.21", "ports": [{"name": "web", "port": 9091}]}}),
+        );
+        o
+    }
+
+    fn os(ns: &str, name: &str, created: &str, spec: Value) -> Value {
+        json!({"metadata": {"namespace": ns, "name": name, "creationTimestamp": created}, "spec": spec})
+    }
+
+    fn rule_of(t: &Table, host: &str, path: &str) -> Option<Arc<Rule>> {
+        match t.lookup(host, &req("GET", path, None, &http::HeaderMap::new())) {
+            Lookup::Rule(r, _) => Some(r),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_route_is_served_on_its_default_host_and_admitted() {
+        let o = os_objects(vec![os("openshift-monitoring", "prometheus-k8s", "2026-11-25T00:00:00Z", json!({
+            "to": {"kind": "Service", "name": "prometheus-k8s", "weight": 3},
+            "alternateBackends": [{"kind": "Service", "name": "thanos", "weight": 1}],
+            "port": {"targetPort": "web"},
+            "tls": {"termination": "reencrypt", "insecureEdgeTerminationPolicy": "Redirect"}
+        }))]);
+        let (t, _) = build(&o, &mut Known::default());
+        let host = "prometheus-k8s-openshift-monitoring.storm1.g8.lo";
+        let r = rule_of(&t, host, "/api/v1/query").expect("served");
+        assert_eq!(r.insecure, Insecure::Redirect);
+        let names: Vec<(String, u32, Proto)> = r.backends.iter().map(|b| (b.name.clone(), b.weight, b.proto.clone())).collect();
+        assert_eq!(names, [
+            ("openshift-monitoring/prometheus-k8s:9091".into(), 3, Proto::Https(Some("prometheus-k8s.openshift-monitoring.svc".into()))),
+            ("openshift-monitoring/thanos:9091".into(), 1, Proto::Https(Some("thanos.openshift-monitoring.svc".into()))),
+        ]);
+        let mut n = HashMap::<String, u32>::new();
+        for _ in 0..8 {
+            *n.entry(r.choose().unwrap().name.clone()).or_default() += 1;
+        }
+        assert_eq!(n["openshift-monitoring/prometheus-k8s:9091"], 6);
+
+        let info = &t.routes[0];
+        assert_eq!(info.os.as_ref().unwrap().host, host);
+        let ing = route_ingress(info, "2026-11-25T01:00:00Z").unwrap();
+        assert_eq!(ing, json!([{"host": host, "routerName": "stormlb", "wildcardPolicy": "None",
+            "conditions": [{"type": "Admitted", "status": "True", "lastTransitionTime": "2026-11-25T01:00:00Z"}]}]));
+        // Read back as written: nothing to write.
+        let mut o = o;
+        o.os_routes[0]["status"] = json!({"ingress": ing});
+        let (t, _) = build(&o, &mut Known::default());
+        assert_eq!(route_ingress(&t.routes[0], "2026-11-26T00:00:00Z"), None);
+        assert_eq!(problems(&t.routes[0]), "");
+    }
+
+    #[test]
+    fn target_ports_name_a_port_a_target_or_default_to_the_first() {
+        let o = os_objects(vec![]);
+        let p = |t: Value| route_port(&o, "openshift-monitoring", "prometheus-k8s", &t);
+        assert_eq!(p(Value::Null), Ok(9091));
+        assert_eq!(p(json!("web")), Ok(9091));
+        assert_eq!(p(json!("metrics")), Ok(9092));
+        assert_eq!(p(json!(9192)), Ok(9092), "a target port number");
+        assert_eq!(p(json!("9192")), Ok(9092));
+        assert_eq!(p(json!(9091)), Ok(9091), "a port number when no target port matches");
+        assert!(p(json!("nope")).unwrap_err().starts_with("BackendNotFound: "));
+        assert_eq!(route_port(&o, "x", "missing", &Value::Null), Ok(80), "a missing Service is said by resolve");
+    }
+
+    #[test]
+    fn the_oldest_route_holds_a_host_and_another_namespace_cannot_share_it() {
+        let to = json!({"kind": "Service", "name": "thanos"});
+        let o = os_objects(vec![
+            os("b", "late", "2026-11-25T02:00:00Z", json!({"host": "app.test", "to": to})),
+            os("openshift-monitoring", "first", "2026-11-25T00:00:00Z", json!({"host": "app.test", "to": to})),
+            os("openshift-monitoring", "same", "2026-11-25T01:00:00Z", json!({"host": "app.test", "to": to})),
+            os("openshift-monitoring", "api", "2026-11-25T03:00:00Z", json!({"host": "app.test", "path": "/api", "to": to})),
+        ]);
+        let (t, _) = build(&o, &mut Known::default());
+        let by = |n: &str| t.routes.iter().find(|r| r.name == n).unwrap();
+        assert!(by("first").os.as_ref().unwrap().rejected.is_none());
+        assert!(by("api").os.as_ref().unwrap().rejected.is_none(), "same namespace, another path");
+        for n in ["same", "late"] {
+            let (reason, _) = by(n).os.as_ref().unwrap().rejected.clone().unwrap();
+            assert_eq!(reason, "HostAlreadyClaimed", "{n}");
+            let ing = route_ingress(by(n), "now").unwrap();
+            assert_eq!(ing[0]["conditions"][0]["status"], "False");
+            assert_eq!(ing[0]["conditions"][0]["reason"], "HostAlreadyClaimed");
+        }
+        assert_eq!(rule_of(&t, "app.test", "/api/x").unwrap().route, "openshift-monitoring/api");
+        assert_eq!(rule_of(&t, "app.test", "/").unwrap().route, "openshift-monitoring/first");
+    }
+
+    #[test]
+    fn tls_terminations_passthrough_wildcards_and_refusals() {
+        let to = json!({"kind": "Service", "name": "thanos"});
+        let mut o = os_objects(vec![
+            os("openshift-monitoring", "pt", "1", json!({"host": "pt.test", "to": to, "tls": {"termination": "passthrough"}})),
+            os("openshift-monitoring", "edge", "2", json!({"host": "edge.test", "to": to,
+                "tls": {"termination": "edge", "insecureEdgeTerminationPolicy": "Allow", "certificate": "PEM", "key": "PEM"}})),
+            os("openshift-monitoring", "deny", "3", json!({"host": "deny.test", "to": to, "tls": {"termination": "edge"}})),
+            os("openshift-monitoring", "wild", "4", json!({"host": "www.apps.test", "to": to, "wildcardPolicy": "Subdomain"})),
+            os("openshift-monitoring", "bad", "5", json!({"host": "bad.test", "to": to, "tls": {"termination": "magic"}})),
+            os("openshift-monitoring", "ptpath", "6", json!({"host": "pp.test", "path": "/x", "to": to, "tls": {"termination": "passthrough"}})),
+            os("openshift-monitoring", "nohost", "7", json!({"to": to})),
+            os("openshift-monitoring", "static", "8", json!({"host": "node.test", "path": "/api"}))
+        ]);
+        o.os_routes[7]["metadata"]["annotations"] = json!({"storm.io/backend": "127.0.0.1:9090"});
+        o.route_domain = None;
+        let (t, _) = build(&o, &mut Known::default());
+        let by = |n: &str| t.routes.iter().find(|r| r.name == n).unwrap();
+        let rejected = |n: &str| by(n).os.as_ref().unwrap().rejected.clone().map(|r| r.0);
+
+        let pt = t.passthrough("PT.test").expect("passthrough by SNI");
+        assert_eq!(pt.backends[0].proto, Proto::Http, "passthrough dials plain TCP; TLS is the client's");
+        assert!(rule_of(&t, "pt.test", "/").is_none(), "a passthrough host has no HTTP rule");
+
+        let edge = rule_of(&t, "edge.test", "/").unwrap();
+        assert_eq!(edge.insecure, Insecure::Allow);
+        assert!(by("edge").dropped[0].contains("certificate is not used"));
+        let ing = route_ingress(by("edge"), "now").unwrap();
+        assert_eq!(ing[0]["conditions"][0]["status"], "True");
+        assert!(ing[0]["conditions"][0]["message"].as_str().unwrap().contains("own certificate"));
+        assert_eq!(rule_of(&t, "deny.test", "/").unwrap().insecure, Insecure::Deny);
+
+        assert!(rule_of(&t, "x.apps.test", "/").is_some(), "Subdomain serves the siblings");
+        assert_eq!(by("wild").hostnames, ["*.apps.test"]);
+        assert_eq!(route_ingress(by("wild"), "now").unwrap()[0]["wildcardPolicy"], "Subdomain");
+
+        assert_eq!(rejected("bad").as_deref(), Some("ExtendedValidationFailed"));
+        assert_eq!(rejected("ptpath").as_deref(), Some("ExtendedValidationFailed"));
+        assert_eq!(rejected("nohost").as_deref(), Some("NoHost"));
+        assert_eq!(route_ingress(by("nohost"), "now").unwrap()[0]["host"], "");
+        assert!(rule_of(&t, "bad.test", "/").is_none());
+
+        let st = rule_of(&t, "node.test", "/api/v1/query").unwrap();
+        assert_eq!(st.backends[0].name, "127.0.0.1:9090");
+        assert!(rule_of(&t, "node.test", "/other").is_none(), "the path still applies to storm.io/backend");
+    }
+
+    #[test]
+    fn a_routes_ingress_keeps_other_routers_and_its_transition_time() {
+        let mut o = os_objects(vec![os("openshift-monitoring", "p", "1", json!({"host": "p.test", "to": {"name": "thanos"}}))]);
+        o.os_routes[0]["status"] = json!({"ingress": [
+            {"host": "p.test", "routerName": "default", "conditions": [{"type": "Admitted", "status": "True"}]},
+            {"host": "p.test", "routerName": "stormlb", "wildcardPolicy": "None",
+             "conditions": [{"type": "Admitted", "status": "False", "reason": "NoHost", "lastTransitionTime": "old"}]}
+        ]});
+        let (t, _) = build(&o, &mut Known::default());
+        let ing = route_ingress(&t.routes[0], "new").unwrap();
+        assert_eq!(ing.as_array().unwrap().len(), 2);
+        assert_eq!(ing[0]["routerName"], "default");
+        assert_eq!(ing[1]["conditions"][0]["lastTransitionTime"], "new", "False -> True is a transition");
     }
 }

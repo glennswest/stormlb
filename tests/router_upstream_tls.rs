@@ -108,7 +108,12 @@ async fn fake_api(routes: Vec<Route>) -> String {
             let body = body.clone();
             tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
-                let _ = s.read(&mut buf).await;
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                // No OpenShift Routes here (#48).
+                if String::from_utf8_lossy(&buf[..n]).contains("/route.openshift.io/") {
+                    let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+                    return;
+                }
                 let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
                 let _ = s.write_all(resp.as_bytes()).await;
             });
@@ -163,6 +168,7 @@ async fn https_backends_are_verified_against_the_ca_or_not_reached() {
         backend_ca_file: Some(trust.to_str().unwrap().into()),
         ca_file: None,
         token_file: None,
+        route_domain: None,
     }));
     let end = Instant::now() + Duration::from_secs(10);
     while !get(port, "plain.test").await.ends_with("plain") {

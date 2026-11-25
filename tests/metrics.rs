@@ -63,7 +63,12 @@ async fn fake_api(app: SocketAddr, dead: SocketAddr) -> String {
             let body = body.clone();
             tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
-                let _ = s.read(&mut buf).await;
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                // No OpenShift Routes here (#48).
+                if String::from_utf8_lossy(&buf[..n]).contains("/route.openshift.io/") {
+                    let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+                    return;
+                }
                 let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
                 let _ = s.write_all(resp.as_bytes()).await;
             });
@@ -102,7 +107,7 @@ async fn metrics_count_what_the_router_did() {
     let dead: SocketAddr = format!("127.0.0.1:{}", free_port().await).parse().unwrap();
     let api = fake_api(app, dead).await;
     let http = free_port().await;
-    tokio::spawn(router::run(RouterCfg { listen: format!("127.0.0.1:{http}"), apiserver: api, poll_secs: 1, insecure: true, tls: None, backend_ca_file: None, ca_file: None, token_file: None }));
+    tokio::spawn(router::run(RouterCfg { listen: format!("127.0.0.1:{http}"), apiserver: api, poll_secs: 1, insecure: true, tls: None, backend_ca_file: None, ca_file: None, token_file: None, route_domain: None }));
     let ml = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mport = ml.local_addr().unwrap().port();
     tokio::spawn(stormlb::metrics::serve(ml, None));

@@ -49,6 +49,7 @@ const CATALOG: &[(&str, &str, &str)] = &[
     ("stormlb_router_backend_requests_total", "counter", "Requests a backend answered, by route (namespace/name), backend (namespace/service:port or address) and status code."),
     ("stormlb_router_backend_endpoints", "gauge", "A route backend's endpoints, by state: total, healthy (ready, passing its check, not ejected)."),
     ("stormlb_router_tls_handshake_errors_total", "counter", "TLS handshakes that failed or timed out."),
+    ("stormlb_router_passthrough_connections_total", "counter", "TLS passthrough connections (OpenShift Routes, by SNI), by route hostname and result (ok: spliced to an endpoint; no_backend: none could be reached, the connection was closed)."),
     ("stormlb_router_routes", "gauge", "Hostnames in the route table."),
     ("stormlb_router_route_refreshes_total", "counter", "Route-table refreshes from the apiserver, by result (ok, error)."),
     ("stormlb_router_tls_certificates_loaded", "gauge", "Certificate/key pairs loaded for the TLS listener."),
