@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### 2026-11-25 (#50)
+- **build:** release wave `dc81988e73` refused 14.03 because
+  golden-stormlb-fa813adb9371 was made from stormd golden-stormd-f46ad22d8b8f
+  while the release carries golden-stormd-b1b78114b5a6. stormcentral rebuilt
+  stormlb at the same commit (ef2dcb7) on the new stormd:
+  golden-stormlb-c719ede0707b (its stormd binary sha256 4d25ba73… is
+  b1b78114b5a6's). No stormlb code change.
+
 ### 2026-11-25 (#48)
 - **feat:** the router serves OpenShift Routes (`route.openshift.io/v1`)
   from the same table as HTTPRoutes, so `oc adm top pvc` can find

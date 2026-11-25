@@ -626,3 +626,9 @@ deliberate commit of its own.
     openshift-monitoring/prometheus-k8s (stormcos#1491) and the check
     `oc get route … -o jsonpath='{.status.ingress[0].host}'` holds.
     Image golden-stormlb-dc4f4acb652e at 986cc9a (stormcos#1529); #48 closed.
+- [x] #50 (P0) wave refusal: 14.03 split stormlb fa813adb9371 (made from
+      stormd f46ad22d8b8f) from stormd b1b78114b5a6. Nothing to change in
+      stormlb: golden-stormlb-c719ede0707b (ef2dcb7, built 2026-11-25 by the
+      wave) carries b1b78114b5a6's stormd binary (sha256 4d25ba73…). CHANGELOG
+      only; sc-build, close #50. Releases stay blocked until stormdrive#190
+      and stormgit#90 are rebuilt too (theirs, not ours).
