@@ -63,7 +63,8 @@ router_id = "192.168.8.51"   # BGP identifier; the IPv4 VIP's next-hop
 # [metrics]
 # listen = "auto:9111"                   # node address + loopback
 
-# The L7 router over HTTPRoutes: each request matched on host, path, method,
+# The L7 router over HTTPRoutes and OpenShift Routes (route.openshift.io/v1,
+# status.ingress written): each request matched on host, path, method,
 # headers and query; weighted backendRefs to the Services' endpoints, with
 # health checks and failover (README "Router"). Its table is at
 # :9111/api/v1/routes. Present = enabled; alone, it is a complete config (no
@@ -77,6 +78,7 @@ router_id = "192.168.8.51"   # BGP identifier; the IPv4 VIP's next-hop
 # token_file = "/data/stormcert/stormlb.token"  # its ServiceAccount's bearer, re-read each poll
 # ca_file = "/data/stormcert/ca.crt"    # verify the apiserver (then insecure is ignored)
 # insecure = true                        # without ca_file: accept the apiserver's cert unverified
+# route_domain = "storm1.g8.lo"          # Routes without spec.host: <name>-<ns>.<this>; default the cert's wildcard
 #
 # TLS for routed hosts: certificates by SNI, re-read when they change; :80
 # redirects to https (except /healthz) once one is loaded.

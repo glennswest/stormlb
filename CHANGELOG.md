@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+### 2026-11-25 (#48)
+- **feat:** the router serves OpenShift Routes (`route.openshift.io/v1`)
+  from the same table as HTTPRoutes, so `oc adm top pvc` can find
+  Prometheus through `openshift-monitoring/prometheus-k8s` (stormcos#1491).
+  Host is `spec.host`, or `<name>-<namespace>.<domain>` with the domain
+  from the new `[router] route_domain`, else the router certificate's
+  wildcard. Also handled: `spec.path` (a prefix), `to` and
+  `alternateBackends` by weight (default 100), `port.targetPort`,
+  `storm.io/backend`, the `haproxy.router.openshift.io/timeout`
+  annotation and `wildcardPolicy: Subdomain`. The oldest Route holds a host
+  (its namespace) and a host + path; a later one is `HostAlreadyClaimed`.
+- **feat:** Route TLS. `edge` and `reencrypt` terminate with the router's
+  certificate; `reencrypt` dials the backend over TLS, verified against
+  `backend_ca_file` for `<svc>.<ns>.svc`. `passthrough` is picked by
+  peeking the ClientHello's SNI and spliced to an endpoint as is. On `:80`
+  a TLS Route follows `insecureEdgeTerminationPolicy` (Allow, Redirect, or
+  None: 308 when the router redirects, else 404).
+- **feat:** `status.ingress` gets the router's entry (`routerName: stormlb`,
+  `wildcardPolicy`, `Admitted` True, or False with `NoHost`,
+  `HostAlreadyClaimed` or `ExtendedValidationFailed`). It is written through
+  `routes/status` only when it changes, and other routers' entries are kept.
+- **feat:** metric `stormlb_router_passthrough_connections_total{host,result}`;
+  `/api/v1/routes` entries carry `kind` (and a Route's host, termination,
+  admission).
+- Routes are listed apart from HTTPRoutes: none served (404) is none, and a
+  refused or failed list keeps the last Routes read (logged once) and never
+  stops the HTTPRoute table.
+- **test:** unit tests (Route hosts, ports, claims, TLS kinds, refusals,
+  status; the SNI parser on a real rustls ClientHello) and
+  `tests/openshift_routes.rs` end to end (status written once, edge with a
+  bearer token, the three plain-HTTP policies, reencrypt, passthrough
+  showing the backend's own certificate). The path-blind fake apiservers of
+  the older tests answer 404 for Routes.
+- Filed rustkube#396 (`routes/status` is 404: falls to the CRD catch-all)
+  and stormcos#1632 (the router's ClusterRole: list `routes`, patch
+  `routes/status`).
+
 ### 2026-11-21 (#46)
 - **chore:** registry `apis` declares `metrics`
   (`http://127.0.0.1:9111/metrics`, 100/1000 ms, 10 s) again. The

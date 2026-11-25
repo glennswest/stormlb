@@ -193,6 +193,26 @@ share answers 500. Grants are listed only when such a ref exists; when they
 cannot be read the refs are refused (fail closed) and the rest of the table
 still updates.
 
+**OpenShift Routes are HTTPRoutes with another shape (#48).** `oc` finds
+Prometheus through the Route `openshift-monitoring/prometheus-k8s`'s
+`status.ingress[].host` (stormcos#1491), and rustkube serves Routes, so the
+router reads them too and builds them into the same table rather than
+running a second router: a Route is one rule (host, path prefix, weighted
+Services or `storm.io/backend`). What is OpenShift's own is kept where a
+client can see it: the default host `<name>-<namespace>.<domain>` (the
+domain from `route_domain`, else the router certificate's wildcard, so a
+node needs no new setting), the oldest Route holding a host,
+`insecureEdgeTerminationPolicy` on `:80`, and `status.ingress` with
+`routerName: stormlb` and `Admitted`. TLS uses the router's certificate:
+edge and reencrypt terminate with it (reencrypt verifies the backend as
+`<svc>.<ns>.svc` against the cluster CA, as OpenShift's service-serving
+certificates are named), and passthrough is decided before any TLS is
+terminated, by peeking the ClientHello's SNI, then spliced. A Route's own
+inline certificate is not served; its `Admitted` message says so instead of
+pretending. Routes are listed apart from HTTPRoutes: a refused Routes list
+(an RBAC rule not shipped yet, stormcos#1632) keeps the last one and never
+stops the HTTPRoute table.
+
 Deliberately not done (yet): HTTPRoute filters (header modifiers, redirects, rewrites, mirrors),
 RegularExpression matches, session persistence, and HTTP/2.
 

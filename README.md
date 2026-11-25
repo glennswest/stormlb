@@ -72,12 +72,13 @@ TOML. Unknown keys are ignored. A fuller example is in
 | Key | Default | Meaning |
 |---|---|---|
 | `listen` | `"0.0.0.0:80"` | Address to listen on. `"auto:<port>"` binds this node's routable IPv4 and `127.0.0.1` on `<port>`; see below. |
-| `apiserver` | `"https://127.0.0.1:6443"` | Where HTTPRoutes, Services, Endpoints, EndpointSlices and ReferenceGrants are read from, and route status is written. |
+| `apiserver` | `"https://127.0.0.1:6443"` | Where HTTPRoutes, OpenShift Routes, Services, Endpoints, EndpointSlices and ReferenceGrants are read from, and route status is written. |
 | `poll_secs` | `5` (min 1) | Seconds between route-table refreshes. |
 | `backend_ca_file` | none | The CA (PEM) a route's backend must chain to when the route says `storm.io/backend-protocol: https`; on a node, the cluster CA `/data/stormcert/ca.crt`. Only these certificates are trusted, not the public roots. Re-read on the route poll when it changes, so it may appear after the router starts. Unset or not loadable: https backends' connections fail closed. |
-| `token_file` | none | The router's identity (#9): a file holding a bearer token, its ServiceAccount's, which stormcos mints (stormcos#395, step 2 of stormcos#76) with list on HTTPRoutes, Services, Endpoints, EndpointSlices and ReferenceGrants and patch on `httproutes/status` (#37). It's sent as `Authorization: Bearer` and re-read on every poll, so it can be rotated in place. Set but missing or empty: no refresh is made, and the last table keeps serving (never a fallback to anonymous). Unset: anonymous, as before. The golden sets `/data/stormcert/stormlb.token` (#33). |
+| `token_file` | none | The router's identity (#9): a file holding a bearer token, its ServiceAccount's, which stormcos mints (stormcos#395, step 2 of stormcos#76) with list on HTTPRoutes, Services, Endpoints, EndpointSlices and ReferenceGrants and patch on `httproutes/status` (#37), and for OpenShift Routes list on `routes` and patch on `routes/status` (`route.openshift.io`, #48; stormcos#1632). It's sent as `Authorization: Bearer` and re-read on every poll, so it can be rotated in place. Set but missing or empty: no refresh is made, and the last table keeps serving (never a fallback to anonymous). Unset: anonymous, as before. The golden sets `/data/stormcert/stormlb.token` (#33). |
 | `ca_file` | none | The CA (PEM) the apiserver's certificate must chain to, on a node `/data/stormcert/ca.crt` (#10). Only it is trusted, not public roots. Re-read when it changes, so it may appear after the router starts. When set, `insecure` is ignored. |
 | `insecure` | `true` | Without `ca_file`: accept the apiserver's certificate unverified. `false` without `ca_file` trusts only the public roots compiled in, which refuses stormcert's certificate. |
+| `route_domain` | none | The domain an OpenShift Route without `spec.host` is served under, as `<name>-<namespace>.<route_domain>`, the way OpenShift's router defaults it (#48). Unset: the domain under the first wildcard name in a loaded `[router.tls]` certificate (on a node `*.storm1.<zone>`, so `storm1.<zone>`). Neither: such a Route is not admitted (`NoHost`). |
 
 `auto:<port>` picks the node's address by asking the routing table (a
 connected UDP socket to `203.0.113.1`, so nothing is sent). It binds that
@@ -199,7 +200,10 @@ that the rule's weights pick.
   a 401/403 names the verbs the router needs (list on those five, patch on
   `httproutes/status`). The ReferenceGrants are the exception: when they
   cannot be read, the table still updates and every cross-namespace ref is
-  refused.
+  refused. So are OpenShift Routes (#48),
+  `/apis/route.openshift.io/v1/routes`, listed on every poll: none served
+  (404) is none, and a refused or failed list keeps the last Routes read
+  (logged once) while the HTTPRoutes update as usual.
   - With `token_file` the router reads as its own ServiceAccount (#9).
     Without it, it reads anonymously, which works only where anonymous may
     list, i.e. the stormcos `sno` and `bastion` apiservers with
@@ -301,7 +305,55 @@ that the rule's weights pick.
   the same entry, so nodes that disagree on health would take turns. The
   rustkube apiserver currently answers 404 for HTTPRoute `/status`
   (rustkube#348), so no status appears there yet. The same table, with
-  every endpoint's state, is `GET /api/v1/routes` on the metrics listener.
+  every endpoint's state, is `GET /api/v1/routes` on the metrics listener
+  (each entry's `kind` is `HTTPRoute` or `Route`).
+- **OpenShift Routes** (`route.openshift.io/v1`, #48) are served from the
+  same table, one rule each. This is how `oc` finds Prometheus: it reads
+  `openshift-monitoring/prometheus-k8s`'s `status.ingress[].host` and calls
+  `https://<host>/api/v1/query` with the user's token (stormcos#1491).
+  - **Host**: `spec.host`, or when it is empty
+    `<name>-<namespace>.<domain>`, the domain being `[router] route_domain`
+    or else the router certificate's wildcard (see the table above).
+    `wildcardPolicy: Subdomain` serves `*.<host minus its first label>`.
+  - **Who holds a host**: Routes are taken oldest first. A host belongs to
+    the namespace of its oldest Route, and a host + path to its oldest
+    Route: a later Route from another namespace, or for the same host and
+    path, is not admitted (`HostAlreadyClaimed`). HTTPRoutes and Routes on
+    one host are not checked against each other; their rules merge, with
+    the precedence above.
+  - **Path**: `spec.path` is a prefix, element-wise as for HTTPRoutes.
+  - **Backends**: `spec.to` and `spec.alternateBackends` (Services in the
+    Route's namespace; `weight` 0–256, default 100, split as above). The
+    port is the Service port that `spec.port.targetPort` names: its name, a
+    target port name or number, else a port number; unset, the first port.
+    `storm.io/backend` overrides them, as on an HTTPRoute (with the
+    Route's path still applied). `haproxy.router.openshift.io/timeout` is
+    the request timeout. Endpoints, health checks, balance and failover to
+    another endpoint are as for HTTPRoutes.
+  - **TLS**: `edge` and `reencrypt` terminate with the router's own
+    certificate (`[router.tls]`). `reencrypt` then dials the backend over
+    TLS, verified against `backend_ca_file` for
+    `<service>.<namespace>.svc` (or `storm.io/backend-server-name`).
+    `passthrough` is not terminated: the TLS listener peeks the
+    ClientHello's SNI (only while some Route is passthrough), and a
+    passthrough host's connection is spliced to an endpoint as is (up to 3
+    endpoints tried). A Route's own `certificate`/`key` and
+    `destinationCACertificate` are not used, and its `Admitted` message
+    says so.
+  - **Plain HTTP** for a TLS Route follows `insecureEdgeTerminationPolicy`:
+    `Allow` serves it, `Redirect` sends `308` to https, `None` (the default)
+    sends `308` when the router redirects anyway (`[router.tls] redirect`
+    with a certificate loaded) and otherwise answers `404 host <h> is
+    served over https only`. A Route without `tls` follows the router's
+    policy, like an HTTPRoute, and is served on both listeners.
+  - **Status**: the router merge-patches `.../routes/{name}/status`, only
+    when it changed, with its own entry in `status.ingress`: `host`,
+    `routerName: stormlb`, `wildcardPolicy`, and one condition `Admitted`
+    (`True`; or `False` with `NoHost`, `HostAlreadyClaimed` or
+    `ExtendedValidationFailed`: an unknown termination, a passthrough with
+    a path, a bad timeout, …). Other routers' entries are kept. rustkube
+    answers 404 for `routes/status` today (rustkube#396), so the status does
+    not appear there until it is fixed; routing is unaffected.
 - **Proxying**:
   - The request goes to the backend as HTTP/1.1, origin-form, with
     hop-by-hop headers removed (those `Connection` names, `Keep-Alive`, `TE`,
@@ -607,6 +659,7 @@ happened are printed.
 | `stormlb_router_upstream_errors_total` | counter | `host`, `kind` | `connect` (refused, unreachable: the endpoint is ejected and another tried), `tls` (an https backend: no CA loaded, verification or handshake failed), `no_response` (closed before a response head) or `timeout`. |
 | `stormlb_router_connections_total`, `stormlb_router_connections_active` | counter, gauge | `listener` (`http`, `https`) | Connections accepted, and open now. |
 | `stormlb_router_tls_handshake_errors_total` | counter | | Failed or timed-out TLS handshakes. |
+| `stormlb_router_passthrough_connections_total` | counter | `host`, `result` (`ok`, `no_backend`) | TLS passthrough connections (OpenShift Routes, picked by SNI): spliced to an endpoint, or closed because none could be reached. |
 | `stormlb_router_routes` | gauge | | Hostnames in the route table. |
 | `stormlb_router_route_refreshes_total` | counter | `result` (`ok`, `error`) | Route-table reloads from the apiserver. |
 | `stormlb_router_tls_certificates_loaded`, `stormlb_router_tls_reloads_total` | gauge, counter | `result` | Certificate pairs loaded, and (re)loads from changed files. |
@@ -822,6 +875,17 @@ What the code does not do yet, which older docs implied it did:
 - [rustkube#348](https://github.com/glennswest/rustkube/issues/348): rustkube
   answers 404 for HTTPRoute `/status`, so the router's status is not seen
   there (routing is unaffected).
+- [rustkube#396](https://github.com/glennswest/rustkube/issues/396): the same
+  for OpenShift Route `routes/status`, so `oc` finds no
+  `status.ingress[].host` on rustkube until it is fixed.
+- [stormcos#1632](https://github.com/glennswest/stormcos/issues/1632): the
+  router's ServiceAccount may not list `routes` or patch `routes/status`
+  yet, so on a node with `token_file` it logs once that Routes are not read
+  and serves HTTPRoutes only.
+- OpenShift Routes: a Route's own certificate, key and
+  `destinationCACertificate` are not used (the router serves its own
+  certificate and verifies backends against `backend_ca_file`), and its
+  `Admitted` message says so. No `routerCanonicalHostname` is written.
 - LoadBalancer Services (an address per Service, `status.loadBalancer`,
   announcement, `externalTrafficPolicy: Local`) are flowsdn's, not stormlb's
   (owner, stormlb#37): flowsdn#475.

@@ -18,7 +18,7 @@ docs/design.md, as of the commit this file was last changed in.
 
 One static Rust binary, two independent halves:
 
-- **Router** (`[router]`): an L7 HTTP/1.1 proxy over Gateway API HTTPRoutes, routing each request by its rules. *Ships today.*
+- **Router** (`[router]`): an L7 HTTP/1.1 proxy over Gateway API HTTPRoutes and OpenShift Routes, routing each request by its rules. *Ships today.*
 - **VIP half** (`[vip]`, `[api]`): a health-checked L4 proxy for the kube-api VIP, presented by VRRP (L2) or BGP anycast (L3). VIPs can be made and changed at runtime through an HTTP API, for stormcluster (#16).
 
 ---
@@ -81,6 +81,7 @@ Router only if there is no `[vip]`. Otherwise the L4 balancer runs in the foregr
 - **Per request (#26, #37):** an HTTP/1.1 proxy; each request is matched on host (exact, then wildcard), path (Exact/PathPrefix), method, headers and query, with the Gateway API's precedence. Bodies stream; websockets are spliced after the 101.
 - **Backend config from the route (#37):** weighted `backendRefs`, each a pool of the Service's endpoints (EndpointSlices, else Endpoints), round-robin or least-conn; readiness, an optional active check (`storm.io/health-check-*`) and passive ejection; failover to another endpoint; `timeouts` and `retry`. `storm.io/backend` = one static backend (node services).
 - **Status on the object:** Accepted, ResolvedRefs, `storm.io/BackendsHealthy` in `status.parents`; the table with every endpoint at `:9111/api/v1/routes`.
+- **OpenShift Routes (#48):** `route.openshift.io/v1` in the same table: `spec.host` or `<name>-<ns>.storm1.<zone>`, path, weighted `to`/`alternateBackends`; edge/reencrypt with the router's certificate, passthrough by SNI; `status.ingress` (`routerName: stormlb`, `Admitted`), which is what `oc adm top pvc` reads to find Prometheus.
 - **Survives the apiserver:** a failed poll keeps the last good table.
 - **Its identity:** `token_file` (its ServiceAccount's bearer token, re-read each poll) and `ca_file` (the apiserver verified against the cluster CA) (#9, #10). The golden sets both: `ca_file` (#21) and `token_file`, the `storm-lb/stormlb` token the apiserver golden mints (#33, stormcos#395).
 - **Its own answers:** `400` with no Host, `404` naming the host, `200 router alive` for `/healthz` on an unclaimed host, `503` no healthy endpoint, `502` unreachable, `504` timeout.
@@ -112,6 +113,7 @@ Unit-tested; `tests/balancer.rs` drives round-robin and failover through the rea
 | 4-octet ASNs, MP-BGP IPv6 | **done** (#40) |
 | Rules, weights, live endpoints, health, status (#37) | **done**; LoadBalancer Services are flowsdn's (flowsdn#475) |
 | ReferenceGrant for cross-namespace refs | **done** (#42); rustkube serves none yet (rustkube#351), so such refs are refused there |
+| OpenShift Routes + `status.ingress` | **done** (#48); needs RBAC (stormcos#1632) and rustkube's `routes/status` (rustkube#396) |
 | HTTPRoute filters, regex matches | not done |
 | Sub-second VRRP failover (config takes whole seconds) | not possible today |
 
@@ -177,6 +179,7 @@ Full reference: README "Configuration". Example: `examples/stormlb.toml`.
 **Open issues that matter**
 
 - stormcert#69: the router's wildcard pair isn't renewed yet
+- stormcos#1632, rustkube#396: Routes need the router's RBAC and a `routes/status` on rustkube before `status.ingress` shows on a node
 
 ---
 

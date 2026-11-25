@@ -613,7 +613,7 @@ deliberate commit of its own.
         unaffected).
   - [x] Unit tests (routes, SNI parser), tests/openshift_routes.rs end to
         end (status, edge, redirect/allow/deny, reencrypt, passthrough).
-  - [ ] Docs (README, design, deck, example), CHANGELOG.
-  - [ ] File: rustkube (routes/status is 404: falls to the CRD catch-all),
-        stormcos (85-stormlb.yaml: list routes, patch routes/status).
+  - [x] Docs (README, design, deck, example), CHANGELOG.
+  - [x] Filed rustkube#396 (routes/status is 404: CRD catch-all) and
+        stormcos#1632 (85-stormlb.yaml: list routes, patch routes/status).
   - [ ] sc-build, image, close #48.
