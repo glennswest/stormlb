@@ -482,6 +482,15 @@ deliberate commit of its own.
         981050f) but not installed; proposed --after-install
         stormpump>=981050f@pvetest2 and flowsdn>=6a1ab6a@pvetest2 (the
         flowsdn test machine; it needs a pool in its record, master's).
+        2026-11-26: both installed (pvetest1, pvetest2 on 14.06-flowsdn),
+        so the item came back. pvetest2 still has no pool (flowsdn pools
+        list empty); pvetest1 has one (stormcentral#1535) but was down.
+        No storefront run in stormcentral's last 500. The proof is
+        stormstorefront's medium (`lb_front`, spread, drain report
+        `gap stormlb#37` until edge-lb has an address); our token can't
+        run it (403). Asked on stormstorefront#6 (`--tag pvetest1`),
+        noted the master (pvetest2's pool); proposed --after
+        stormstorefront#6. No stormlb change, so no sc-build or image.
 - [x] #38 (P-1) no stubs: README said VRRP over IPv6 was a stub.
       The config already refuses both (vrrp on an IPv6 address; BGP ASN >
       65535), so docs now say "refused" and the gaps are #39, #40 (P3).
