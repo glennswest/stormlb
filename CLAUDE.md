@@ -353,7 +353,7 @@ deliberate commit of its own.
       #25 (harness long wave flake), #26 (per-connection routing/metrics),
       #27 (test/ headers vs stormcentral#121 option B), #28 (VIP port decided,
       docs stale), all P3. Everything cross-component was already filed.
-- [x] #21 (2026-11-07) shipped config: what the node now provides.
+- [ ] #21 (2026-11-07) shipped config: what the node now provides.
       stormcos#363 is closed and validated (12.58 lineage): stormcos
       `stormcert-serving-router` mints `/data/stormcert/router.{crt,key}`
       (`*.storm1.g8.lo`, node name/address, localhost, 127.0.0.1) from the
@@ -386,6 +386,12 @@ deliberate commit of its own.
         stopped while ~80 deep in the line. Image build 69a77a7da2a0 at
         7a8fb4b; `shipped` with proof `log:router TLS: loaded
         /data/stormcert/router.crt` (closes on a test machine).
+        2026-11-26: reopened, proof failed on pvetest1-1795671725: `log:`
+        is the install's log; stormlb's output reaches neither it nor
+        syslog (stormcert-serving-router did run there). Re-shipped with
+        `get:http://{node}:9111/metrics ~
+        stormlb_router_tls_certificates_loaded [1-9]` (#30's `get:` on
+        :9111 held on that install). No code change.
 - [x] #30 (P1) ports: `[api]` 9103 is sectionsystems', `[metrics]` 9104 is
       stormblock-csi's (stormcos#65); both bind the wildcard on the host
       network. Registry free 9109–9119; 9110 is stormcentral's own default.
