@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### 2026-11-26 (#21)
+- **chore:** #21's proof changed. `log:` reads the install's log, and
+  stormlb's own output is in neither that log nor syslog, so
+  `log:router TLS: loaded …` could never hold (it failed on pvetest1
+  install `pvetest1-1795671725`, which did mint `router.crt`). The new
+  proof is the router's gauge on the metrics port, the same port #30's
+  proof read on that install:
+  `get:http://{node}:9111/metrics ~ stormlb_router_tls_certificates_loaded [1-9]`.
+  No code change.
+
 ### 2026-11-25 (#50)
 - **build:** release wave `dc81988e73` refused 14.03 because
   golden-stormlb-fa813adb9371 was made from stormd golden-stormd-f46ad22d8b8f
