@@ -392,6 +392,8 @@ deliberate commit of its own.
         `get:http://{node}:9111/metrics ~
         stormlb_router_tls_certificates_loaded [1-9]` (#30's `get:` on
         :9111 held on that install). No code change.
+        sc-build passed at 9181294 (build VM, release/test/doc); image
+        build 8fab085a147a; `shipped` again (closes on a test machine).
 - [x] #30 (P1) ports: `[api]` 9103 is sectionsystems', `[metrics]` 9104 is
       stormblock-csi's (stormcos#65); both bind the wildcard on the host
       network. Registry free 9109–9119; 9110 is stormcentral's own default.
